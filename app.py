@@ -179,8 +179,9 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
     asset_rows = list(current_balances.keys())
     fx_mult_global = st.session_state.fx_rate if st.session_state.fx_enable else 1.0
     
-    # State Tracker for Guardrails
+    # State Tracker for Guardrails & Past Gifts
     spend_level = 1.0 
+    cumulative_gifts_tracker = 0.0
     
     def execute_draw(asset, gross_amount_native, statutory_tax_rate, is_brokerage, draws_dict, taxes_dict):
         if gross_amount_native <= 0 or current_balances[asset] <= 0: return 0.0
@@ -322,25 +323,29 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         irs_shadow_tax_usd = taxable_ss_usd * (st.session_state.us_ss_tax_rate / 100.0)
         net_ss_usd = gross_ss_usd - irs_shadow_tax_usd
         
-        # 2. Dynamic Gifting Math (Unslashed Basis)
+        # 2. Dynamic Gifting Math (Smoothed Recalibrating Annuity)
         base_gift_usd = 0
         if st.session_state.gift_start_age <= age <= st.session_state.gift_end_age:
             n_total = 100 - age
             approx_annual_draw = max(0, target_lifestyle_usd - net_ss_usd)
-            # Future Value of all remaining lifestyle draws to age 100
+            
             if usd_yr_return == i_rate:
                 fv_draws = approx_annual_draw * n_total * (1+usd_yr_return)**(n_total - 1)
             else:
                 fv_draws = approx_annual_draw * (((1+usd_yr_return)**n_total - (1+i_rate)**n_total) / (usd_yr_return - i_rate))
                 
-            fv_nogift = max(0, current_portfolio * (1+usd_yr_return)**n_total - fv_draws)
-            target_gift_fv = (st.session_state.dynamic_gift_pct / 100.0) * fv_nogift
+            # Add back the FV of past gifts to find the TRUE "No-Gift" Terminal Pie
+            fv_past_gifts = cumulative_gifts_tracker * (1 + usd_yr_return)**n_total
+            total_fv_nogift = max(0, (current_portfolio * (1+usd_yr_return)**n_total) - fv_draws + fv_past_gifts)
+            
+            target_total_gift_fv = (st.session_state.dynamic_gift_pct / 100.0) * total_fv_nogift
+            remaining_gift_fv_needed = max(0, target_total_gift_fv - fv_past_gifts)
             
             n_rem_gifts = st.session_state.gift_end_age - age + 1
             if n_rem_gifts > 0 and usd_yr_return > 0:
                 fvifa = (((1+usd_yr_return)**n_rem_gifts) - 1) / usd_yr_return
                 growth_after_gifts = (1+usd_yr_return)**(100 - st.session_state.gift_end_age)
-                base_gift_usd = target_gift_fv / (fvifa * growth_after_gifts)
+                base_gift_usd = remaining_gift_fv_needed / (fvifa * growth_after_gifts)
                 
         # 3. Guardrails Logic
         if st.session_state.guardrails_enable and current_portfolio > 0:
@@ -348,11 +353,9 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
             eval_wr = max(0, eval_draw) / current_portfolio
             
             if eval_wr > (st.session_state.slash_trigger / 100.0):
-                # Slash to floor
                 floor_level = floor_usd_inflated / target_lifestyle_usd
                 spend_level = floor_level
             elif eval_wr < (st.session_state.recovery_trigger / 100.0) and spend_level < 1.0:
-                # Raise
                 spend_level = min(1.0, spend_level * (1 + (st.session_state.raise_pct / 100.0)))
         else:
             spend_level = 1.0
@@ -361,7 +364,9 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         actual_lifestyle_usd = target_lifestyle_usd * spend_level
         actual_gift_usd = base_gift_usd * spend_level
         
-        # Convert applied targets to EUR base for the drawdown engine
+        # Update phantom ledger for next year's smoothed calculation
+        cumulative_gifts_tracker = cumulative_gifts_tracker * (1 + usd_yr_return) + actual_gift_usd
+        
         target_lifestyle_eur = actual_lifestyle_usd / current_fx if not is_slovenia else actual_lifestyle_usd
         gift_need_eur = actual_gift_usd / current_fx
         ss_eur_equivalent = net_ss_usd / current_fx
@@ -801,6 +806,35 @@ elif selection == "7. Cash Flow & Slovenian Drip":
         
     st.dataframe(df_tax.style.format("{:.1%}"), use_container_width=True, height=500)
 
+    st.markdown("---")
+    st.subheader("3. Generational Wealth Transfer (Giving While Living) Summary")
+    
+    if start_yr in df_draw.columns:
+        gift_nominal = df_draw.loc["Actual Generational Drip"]
+        gift_real = df_draw_real.loc["Actual Generational Drip"]
+        
+        df_gift_summary = pd.DataFrame({
+            "Nominal Annual Gift": gift_nominal,
+            "Real Annual Gift (2026 $)": gift_real,
+            "Cumulative Nominal Gift": gift_nominal.cumsum(),
+            "Cumulative Real Gift": gift_real.cumsum()
+        })
+        
+        df_gift_active = df_gift_summary[df_gift_summary["Nominal Annual Gift"] > 0]
+        
+        if not df_gift_active.empty:
+            c1, c2 = st.columns(2)
+            c1.metric("Total Lifetime Gift (Nominal)", f"${df_gift_active['Cumulative Nominal Gift'].iloc[-1]:,.0f}")
+            c2.metric("Total Lifetime Gift (Real 2026 $)", f"${df_gift_active['Cumulative Real Gift'].iloc[-1]:,.0f}")
+            
+            fig_gift = px.bar(df_gift_active, y=["Nominal Annual Gift", "Real Annual Gift (2026 $)"], barmode='group')
+            fig_gift.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), xaxis_title="Year", yaxis_title="Gift Amount ($)")
+            st.plotly_chart(fig_gift, use_container_width=True)
+            
+            st.dataframe(df_gift_active.style.format("${:,.0f}"), use_container_width=True)
+        else:
+            st.info("No generational gifting is projected under the current guardrail and timing parameters.")
+
 # -----------------------------------------------------------------------------
 # 8. YEARLY BALANCES (2026-2089)
 # -----------------------------------------------------------------------------
@@ -891,7 +925,7 @@ elif selection == "10. Institutional Stress Testing":
     
     st.markdown("---")
     st.subheader("C. Foreign Exchange Risk (USD/EUR)")
-    st.markdown("If your lifestyle targets are effectively priced in Euros, a weakening US Dollar forces your portfolio to bleed faster. *Note: IBKR and Cash ledgers are exempt from this drag as they represent Synthetic Euro Hedges.*")
+    st.markdown("If your lifestyle targets are effectively priced in Euros, a weakening US Dollar forces your portfolio to bleed faster to afford the same lifestyle. *Note: IBKR and Cash ledgers are exempt from this drag as they represent Synthetic Euro Hedges.*")
     f1, f2 = st.columns(2)
     st.session_state.fx_enable = f1.toggle("Enable Currency Drag", value=st.session_state.fx_enable)
     st.session_state.fx_rate = f2.number_input("Assumed EUR/USD Exchange Rate (e.g. 1.15 = $1.15 USD per €1.00)", value=st.session_state.fx_rate, step=0.05)
