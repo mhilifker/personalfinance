@@ -24,6 +24,7 @@ if 'execute_great_reset' not in st.session_state: st.session_state.execute_great
 # Lifetime Tax Smoothing & Giving While Living
 if 'enable_smoothing' not in st.session_state: st.session_state.enable_smoothing = True
 if 'target_early_draw' not in st.session_state: st.session_state.target_early_draw = 144000
+if 'target_bequest' not in st.session_state: st.session_state.target_bequest = 7500000
 if 'gift_start_age' not in st.session_state: st.session_state.gift_start_age = 58
 if 'gift_end_age' not in st.session_state: st.session_state.gift_end_age = 83
 
@@ -175,8 +176,18 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
     
     rmd_divisors = {75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1, 80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0, 86: 15.2, 87: 14.4, 88: 13.7, 89: 12.9, 90: 12.2, 91: 11.5, 92: 10.8, 93: 10.1, 94: 9.5, 95: 8.9, 96: 8.4, 97: 7.8, 98: 7.3, 99: 6.8, 100: 6.4}
     
+    r_discount = st.session_state.usd_market_return / 100.0 
+    n_years_giving = st.session_state.gift_end_age - st.session_state.gift_start_age + 1
+    years_to_100 = 100 - st.session_state.gift_start_age
+    
+    if r_discount > 0 and n_years_giving > 0:
+        pv_at_start = st.session_state.target_bequest / ((1 + r_discount) ** years_to_100)
+        annual_gift = (pv_at_start * r_discount) / (1 - (1 + r_discount) ** -n_years_giving)
+    else: annual_gift = 0
+    
     bal_matrix, draw_matrix, tax_matrix = {}, {}, {}
     asset_rows = list(current_balances.keys())
+    
     fx_mult_global = st.session_state.fx_rate if st.session_state.fx_enable else 1.0
     
     # State Tracker for Guardrails & Past Gifts
