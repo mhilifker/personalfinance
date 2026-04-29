@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # -----------------------------------------------------------------------------
 # PAGE & SESSION STATE CONFIGURATION
@@ -23,8 +24,7 @@ if 'execute_great_reset' not in st.session_state: st.session_state.execute_great
 
 # Lifetime Tax Smoothing & Giving While Living
 if 'enable_smoothing' not in st.session_state: st.session_state.enable_smoothing = True
-if 'target_early_draw' not in st.session_state: st.session_state.target_early_draw = 144000
-if 'target_bequest' not in st.session_state: st.session_state.target_bequest = 7500000
+if 'target_early_draw' not in st.session_state: st.session_state.target_early_draw = 210000
 if 'gift_start_age' not in st.session_state: st.session_state.gift_start_age = 58
 if 'gift_end_age' not in st.session_state: st.session_state.gift_end_age = 83
 
@@ -45,7 +45,7 @@ if 'pmi_rate' not in st.session_state: st.session_state.pmi_rate = 0.5
 if 'ann_apprec' not in st.session_state: st.session_state.ann_apprec = 2.0
 
 # Decoupled SS Claim Ages
-if 'mike_ss_age' not in st.session_state: st.session_state.mike_ss_age = 70
+if 'mike_ss_age' not in st.session_state: st.session_state.mike_ss_age = 67
 if 'steph_ss_age' not in st.session_state: st.session_state.steph_ss_age = 70
 
 # SS Macros
@@ -62,28 +62,28 @@ if 'spend_wind' not in st.session_state: st.session_state.spend_wind = 100000
 
 # Guardrails & Dynamic Gifting
 if 'guardrails_enable' not in st.session_state: st.session_state.guardrails_enable = True
-if 'floor_golden' not in st.session_state: st.session_state.floor_golden = 75000
+if 'floor_golden' not in st.session_state: st.session_state.floor_golden = 65000
 if 'floor_middle' not in st.session_state: st.session_state.floor_middle = 75000
-if 'floor_wind' not in st.session_state: st.session_state.floor_wind = 85000
-if 'slash_trigger' not in st.session_state: st.session_state.slash_trigger = 6.0
-if 'recovery_trigger' not in st.session_state: st.session_state.recovery_trigger = 4.5
-if 'raise_pct' not in st.session_state: st.session_state.raise_pct = 10.0
-if 'dynamic_gift_pct' not in st.session_state: st.session_state.dynamic_gift_pct = 50.0
+if 'floor_wind' not in st.session_state: st.session_state.floor_wind = 100000
+if 'slash_trigger' not in st.session_state: st.session_state.slash_trigger = 5.25
+if 'recovery_trigger' not in st.session_state: st.session_state.recovery_trigger = 4.25
+if 'raise_pct' not in st.session_state: st.session_state.raise_pct = 33.0
+if 'dynamic_gift_pct' not in st.session_state: st.session_state.dynamic_gift_pct = 65.0
 
 # Institutional Stress Test Macros
 if 'sorr_enable' not in st.session_state: st.session_state.sorr_enable = False
 if 'sorr_start_yr' not in st.session_state: st.session_state.sorr_start_yr = 2044
-if 'sorr_duration' not in st.session_state: st.session_state.sorr_duration = 3
+if 'sorr_duration' not in st.session_state: st.session_state.sorr_duration = 2
 if 'sorr_return' not in st.session_state: st.session_state.sorr_return = -15.0
-if 'fx_enable' not in st.session_state: st.session_state.fx_enable = False
-if 'fx_rate' not in st.session_state: st.session_state.fx_rate = 1.15
+if 'fx_enable' not in st.session_state: st.session_state.fx_enable = True
+if 'fx_rate' not in st.session_state: st.session_state.fx_rate = 1.30
 
 # Bifurcated Glide Path
-if 'glide_enable' not in st.session_state: st.session_state.glide_enable = False
+if 'glide_enable' not in st.session_state: st.session_state.glide_enable = True
 if 'glide_start_age' not in st.session_state: st.session_state.glide_start_age = 65
 if 'glide_end_age' not in st.session_state: st.session_state.glide_end_age = 85
-if 'usd_glide_reduction' not in st.session_state: st.session_state.usd_glide_reduction = 0.15
-if 'eur_glide_reduction' not in st.session_state: st.session_state.eur_glide_reduction = 0.05
+if 'usd_glide_reduction' not in st.session_state: st.session_state.usd_glide_reduction = 0.1
+if 'eur_glide_reduction' not in st.session_state: st.session_state.eur_glide_reduction = 0.055
 
 # Centralized Asset Balances 
 if 'asset_balances' not in st.session_state:
@@ -103,9 +103,9 @@ if 'asset_balances' not in st.session_state:
 if 'policy_df' not in st.session_state:
     st.session_state.policy_df = pd.DataFrame({
         "Asset Category": list(st.session_state.asset_balances.keys()),
-        "Annual Savings Escalator (%)": [0.0, 3.0, 3.0, 0.0, 3.0, 3.0, 0.0, 0.0, 3.0, 0.0],
-        "Current State": [0, 30000, 20000, 0, 15000, 12000, 0, 0, 8300, 0],
-        "Northbrook Grind": [0, 15000, 23500, 0, 0, 12000, 0, 0, 0, 0]
+        "Annual Savings Escalator (%)": [0.0, 0.5, 0.5, 0.0, -20.0, 0.5, 0.0, 0.0, 0.5, 0.0],
+        "Current State": [0, 30000, 30000, 0, 15000, 18000, 0, 0, 8300, 0],
+        "Northbrook Grind": [0, 15000, 30000, 0, 15000, 18000, 0, 0, 0, 0]
     })
 
 if 'mike_history' not in st.session_state:
@@ -176,16 +176,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
     
     rmd_divisors = {75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1, 80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0, 86: 15.2, 87: 14.4, 88: 13.7, 89: 12.9, 90: 12.2, 91: 11.5, 92: 10.8, 93: 10.1, 94: 9.5, 95: 8.9, 96: 8.4, 97: 7.8, 98: 7.3, 99: 6.8, 100: 6.4}
     
-    r_discount = st.session_state.usd_market_return / 100.0 
-    n_years_giving = st.session_state.gift_end_age - st.session_state.gift_start_age + 1
-    years_to_100 = 100 - st.session_state.gift_start_age
-    
-    if r_discount > 0 and n_years_giving > 0:
-        pv_at_start = st.session_state.target_bequest / ((1 + r_discount) ** years_to_100)
-        annual_gift = (pv_at_start * r_discount) / (1 - (1 + r_discount) ** -n_years_giving)
-    else: annual_gift = 0
-    
-    bal_matrix, draw_matrix, tax_matrix = {}, {}, {}
+    bal_matrix, draw_matrix, tax_matrix, cont_matrix, wr_matrix = {}, {}, {}, {}, {}
     asset_rows = list(current_balances.keys())
     
     fx_mult_global = st.session_state.fx_rate if st.session_state.fx_enable else 1.0
@@ -256,6 +247,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
             eur_yr_return = st.session_state.sorr_return / 100.0
 
         if yr < start_yr:
+            yr_conts = {}
             for asset in current_balances.keys():
                 if asset in policy.index:
                     esc = policy.loc[asset, "Annual Savings Escalator (%)"] / 100.0
@@ -268,8 +260,11 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
                 elif asset == "IBKR (Active)": asset_ret = eur_yr_return
                 else: asset_ret = usd_yr_return
                 
+                yr_conts[asset] = cont
                 current_balances[asset] = current_balances[asset] * (1 + asset_ret) + cont
                 current_basis[asset] += cont 
+                
+            cont_matrix[yr] = yr_conts
             bal_col = current_balances.copy()
             bal_col["Total Portfolio Balance"] = sum(current_balances.values())
             bal_matrix[yr] = bal_col
@@ -359,21 +354,29 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
                 base_gift_usd = remaining_gift_fv_needed / (fvifa * growth_after_gifts)
                 
         # 3. Guardrails Logic
-        if st.session_state.guardrails_enable and current_portfolio > 0:
-            eval_draw = (target_lifestyle_usd + base_gift_usd) * spend_level - net_ss_usd
-            eval_wr = max(0, eval_draw) / current_portfolio
+        # Calculate Withdrawal Rate based on Lifestyle Draw only to test against Guardrails
+        current_wr = 0.0
+        if current_portfolio > 0:
+            eval_lifestyle_draw = max(0, (target_lifestyle_usd * spend_level) - net_ss_usd)
+            current_wr = eval_lifestyle_draw / current_portfolio
             
-            if eval_wr > (st.session_state.slash_trigger / 100.0):
-                floor_level = floor_usd_inflated / target_lifestyle_usd
-                spend_level = floor_level
-            elif eval_wr < (st.session_state.recovery_trigger / 100.0) and spend_level < 1.0:
-                spend_level = min(1.0, spend_level * (1 + (st.session_state.raise_pct / 100.0)))
+            if st.session_state.guardrails_enable:
+                if current_wr > (st.session_state.slash_trigger / 100.0):
+                    floor_level = floor_usd_inflated / target_lifestyle_usd
+                    spend_level = floor_level
+                elif current_wr < (st.session_state.recovery_trigger / 100.0) and spend_level < 1.0:
+                    spend_level = min(1.0, spend_level * (1 + (st.session_state.raise_pct / 100.0)))
         else:
             spend_level = 1.0
 
         # 4. Finalize Actual Targets
         actual_lifestyle_usd = target_lifestyle_usd * spend_level
         actual_gift_usd = base_gift_usd * spend_level
+        
+        # Capture actual WR for tracking (incorporating newly slashed level if applicable)
+        final_eval_draw = max(0, actual_lifestyle_usd - net_ss_usd)
+        final_wr = final_eval_draw / current_portfolio if current_portfolio > 0 else 0.0
+        wr_matrix[yr] = final_wr
         
         # Update phantom ledger for next year's smoothed calculation
         cumulative_gifts_tracker = cumulative_gifts_tracker * (1 + usd_yr_return) + actual_gift_usd
@@ -470,7 +473,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         d_col["Michael's SS"] = ss_m
         d_col["Stephanie's SS"] = ss_s
         d_col["-------------------"] = 0 
-        d_col["Actual Lifestyle Spend"] = actual_lifestyle_usd if is_slovenia else target_lifestyle_eur 
+        d_col["Actual Lifestyle Spend"] = actual_lifestyle_usd
         d_col["Actual Generational Drip"] = actual_gift_usd
         d_col["Total Gross Drawn"] = total_gross_portfolio + gross_ss_usd
         d_col["IRS Tax on SS (US)"] = -irs_shadow_tax_usd
@@ -488,7 +491,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         b_col["Total Portfolio Balance"] = sum(current_balances.values())
         bal_matrix[yr] = b_col
 
-    return pd.DataFrame(bal_matrix), pd.DataFrame(draw_matrix), pd.DataFrame(tax_matrix)
+    return pd.DataFrame(bal_matrix), pd.DataFrame(draw_matrix), pd.DataFrame(tax_matrix), pd.DataFrame(cont_matrix), pd.Series(wr_matrix)
 
 # -----------------------------------------------------------------------------
 # PAGE ROUTING
@@ -520,8 +523,9 @@ if selection == "1. Executive Dashboard":
     st.session_state.ret_age = c1.number_input("Retirement Age", value=st.session_state.ret_age)
     st.session_state.move_age = c2.number_input("Move to Slovenia Age", value=st.session_state.move_age)
 
-    df_bal, df_draw, _ = run_core_simulation()
+    df_bal, df_draw, _, df_conts, wr_series = run_core_simulation()
     start_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
+    inf_rate = st.session_state.inflation_rate / 100.0
     
     st.markdown("---")
     
@@ -548,7 +552,7 @@ if selection == "1. Executive Dashboard":
         }
     ))
     
-    fig_gauge.update_layout(height=350, margin=dict(l=10, r=10, t=50, b=10))
+    fig_gauge.update_layout(height=150, margin=dict(l=50, r=50, t=50, b=10))
     st.plotly_chart(fig_gauge, use_container_width=True)
 
     st.subheader(f"Asset & Tax Lot Balances ({start_yr}-2089)")
@@ -557,7 +561,6 @@ if selection == "1. Executive Dashboard":
     if 2089 not in milestone_years: milestone_years.append(2089)
     
     milestone_data = {}
-    inf_rate = st.session_state.inflation_rate / 100.0
     for yr in milestone_years:
         if yr in df_bal.columns:
             nom_val = df_bal.loc['Total Portfolio Balance', yr]
@@ -570,21 +573,17 @@ if selection == "1. Executive Dashboard":
     df_milestones = pd.DataFrame(milestone_data)
     st.dataframe(df_milestones, use_container_width=True)
     
-    real_bals = df_bal.loc['Total Portfolio Balance'].copy()
-    for yr in real_bals.index:
-        real_bals[yr] = real_bals[yr] / ((1 + inf_rate) ** (yr - 2026))
+    discount_factors_bal = np.array([(1 + inf_rate) ** (yr - 2026) for yr in df_bal.columns])
+    df_bal_real = df_bal.div(discount_factors_bal, axis=1)
 
     chart_bals = df_bal.drop("Total Portfolio Balance").T
     if start_yr in chart_bals.index:
         chart_bals = chart_bals.loc[start_yr:]
-        real_bals = real_bals.loc[start_yr:]
         
     fig1 = go.Figure()
     for col in chart_bals.columns:
-        real_asset_bals = chart_bals[col].copy()
-        for yr in real_asset_bals.index:
-            real_asset_bals[yr] = real_asset_bals[yr] / ((1 + inf_rate) ** (yr - 2026))
-            
+        real_asset_bals = df_bal_real.loc[col, start_yr:]
+        
         fig1.add_trace(go.Bar(
             x=chart_bals.index, 
             y=chart_bals[col], 
@@ -594,8 +593,9 @@ if selection == "1. Executive Dashboard":
             hovertemplate="<b>%{x}</b><br>Nominal: $%{y:,.0f}<br>Real (2026 $): $%{customdata:,.0f}<extra></extra>"
         ))
         
+    real_total_bals = df_bal_real.loc['Total Portfolio Balance', start_yr:]
     fig1.add_trace(go.Scatter(
-        x=real_bals.index, y=real_bals.values, name="Real Portfolio Value (2026 $)",
+        x=real_total_bals.index, y=real_total_bals.values, name="Real Portfolio Value (2026 $)",
         mode='lines', line=dict(color='red', width=3), yaxis='y1',
         hovertemplate="<b>%{x}</b><br>Total Real Balance: $%{y:,.0f}<extra></extra>"
     ))
@@ -608,16 +608,114 @@ if selection == "1. Executive Dashboard":
     st.plotly_chart(fig1, use_container_width=True)
     
     st.markdown("---")
-    st.subheader("Yearly Income Sources (Nominal $)")
+    st.subheader("Yearly Income Sources (Real 2026 $)")
+    
     if start_yr in df_draw.columns:
-        chart_draws = df_draw.loc[:, start_yr:].T
+        discount_factors_draw = np.array([(1 + inf_rate) ** (yr - 2026) for yr in df_draw.columns])
+        df_draw_real = df_draw.div(discount_factors_draw, axis=1)
+        
+        chart_draws = df_draw_real.loc[:, start_yr:].T
+                
         chart_draws['Brokerage & Cash Draw'] = chart_draws['E*TRADE (Legacy)'] + chart_draws['IBKR (Active)'] + chart_draws['Crypto (Coinbase)'] + chart_draws['Cash (Slush Fund)'] + chart_draws['HSA Pool']
         chart_draws['Pre-Tax Draw'] = chart_draws['Cornerstone: Trad 401(k)'] + chart_draws['Cornerstone: Profit Sharing'] + chart_draws['OCC: Trad 401(k)']
         chart_draws['Social Security'] = chart_draws["Michael's SS"] + chart_draws["Stephanie's SS"]
         
-        fig2 = px.bar(chart_draws[['Brokerage & Cash Draw', 'Pre-Tax Draw', 'Social Security']], barmode='stack')
-        fig2.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), xaxis_title="", yaxis_title="Income / Draw ($)")
+        fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+        
+        fig2.add_trace(go.Bar(x=chart_draws.index, y=chart_draws['Brokerage & Cash Draw'], name='Brokerage & Cash Draw'), secondary_y=False)
+        fig2.add_trace(go.Bar(x=chart_draws.index, y=chart_draws['Pre-Tax Draw'], name='Pre-Tax Draw'), secondary_y=False)
+        fig2.add_trace(go.Bar(x=chart_draws.index, y=chart_draws['Social Security'], name='Social Security'), secondary_y=False)
+        
+        fig2.add_trace(go.Scatter(
+            x=chart_draws.index, 
+            y=chart_draws['Actual Generational Drip'], 
+            name="Amount Given (Generational Drip)", 
+            mode='lines+markers', 
+            line=dict(color='gold', width=3, dash='dot')
+        ), secondary_y=False)
+        
+        fig2.add_trace(go.Scatter(
+            x=chart_draws.index, 
+            y=chart_draws['Actual Lifestyle Spend'], 
+            name="Post-Tax Lifestyle Spend", 
+            mode='lines+markers', 
+            line=dict(color='red', width=3)
+        ), secondary_y=False)
+
+        # Plot the WR series on the secondary axis
+        wr_plot_data = wr_series.loc[start_yr:] * 100
+        fig2.add_trace(go.Scatter(
+            x=wr_plot_data.index,
+            y=wr_plot_data.values,
+            name="Gross Withdrawal Rate %",
+            mode='lines',
+            line=dict(color='#00FF00', width=2)
+        ), secondary_y=True)
+        
+        fig2.update_layout(
+            barmode='stack',
+            legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), 
+            hovermode="x unified"
+        )
+        fig2.update_xaxes(title_text="Year")
+        fig2.update_yaxes(title_text="Real Income / Draw (2026 $)", secondary_y=False)
+        fig2.update_yaxes(title_text="Withdrawal Rate (%)", secondary_y=True, tickformat='.1f')
+        
         st.plotly_chart(fig2, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Yearly Savings (Accumulation Phase)")
+    
+    if start_yr in df_draw.columns:
+        gift_nominal = df_draw.loc["Actual Generational Drip", start_yr:]
+        gift_real = df_draw_real.loc["Actual Generational Drip", start_yr:]
+        
+        df_gift_summary = pd.DataFrame({
+            "Nominal Annual Gift": gift_nominal,
+            "Real Annual Gift (2026 $)": gift_real,
+            "Cumulative Nominal Gift": gift_nominal.cumsum(),
+            "Cumulative Real Gift": gift_real.cumsum()
+        })
+        
+        df_gift_active = df_gift_summary[df_gift_summary["Nominal Annual Gift"] > 0]
+        
+        if not df_gift_active.empty:
+            st.markdown("**Generational Wealth Transfer Summary**")
+            g1, g2 = st.columns(2)
+            g1.metric("Total Lifetime Gift (Nominal)", f"${df_gift_summary['Cumulative Nominal Gift'].iloc[-1]:,.0f}")
+            g2.metric("Total Lifetime Gift (Real 2026 $)", f"${df_gift_summary['Cumulative Real Gift'].iloc[-1]:,.0f}")
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+    if not df_conts.empty:
+        df_conts_t = df_conts.T
+        
+        df_conts_t['Total Nominal Savings'] = df_conts_t.sum(axis=1)
+        df_conts_t['Total Real Savings (2026 $)'] = df_conts_t['Total Nominal Savings'] / ((1 + inf_rate) ** (df_conts_t.index - 2026))
+        
+        tot_nom = df_conts_t['Total Nominal Savings'].sum()
+        tot_real = df_conts_t['Total Real Savings (2026 $)'].sum()
+        
+        st.markdown("**Pre-Retirement Contribution Summary**")
+        c1, c2 = st.columns(2)
+        c1.metric("Total Lifetime Savings (Nominal)", f"${tot_nom:,.0f}")
+        c2.metric("Total Lifetime Savings (Real 2026 $)", f"${tot_real:,.0f}")
+        
+        plot_cols = [c for c in df_conts_t.columns if c not in ['Total Nominal Savings', 'Total Real Savings (2026 $)'] and df_conts_t[c].sum() > 0]
+        
+        fig3 = px.bar(df_conts_t, x=df_conts_t.index, y=plot_cols, barmode='stack')
+        
+        fig3.add_trace(go.Scatter(
+            x=df_conts_t.index, 
+            y=df_conts_t['Total Real Savings (2026 $)'], 
+            name="Total Real Savings (2026 $)", 
+            mode='lines+markers', 
+            line=dict(color='gold', width=3)
+        ))
+        
+        fig3.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), xaxis_title="Year", yaxis_title="Savings / Contributions ($)", hovermode="x unified")
+        st.plotly_chart(fig3, use_container_width=True)
+    else:
+        st.info("You are already in or past the retirement phase. No pre-retirement savings projected.")
 
 # -----------------------------------------------------------------------------
 # 2. PRE-SET ASSET LEDGER & TAX LOTS
@@ -779,30 +877,36 @@ elif selection == "6. Social Security & Pensions":
     MIKE_SS, STEPH_SS = get_ss_timelines()
     m_claim_yr = 2026 + (st.session_state.mike_ss_age - st.session_state.current_age)
     s_claim_yr = 2026 + (st.session_state.steph_ss_age - st.session_state.current_age)
+    
+    # Calculate Real 2026 Dollars based on claim year and inflation rate
+    inf_rate = st.session_state.inflation_rate / 100.0
+    m_real_ss = MIKE_SS[m_claim_yr] / ((1 + inf_rate) ** (m_claim_yr - 2026))
+    s_real_ss = STEPH_SS[s_claim_yr] / ((1 + inf_rate) ** (s_claim_yr - 2026))
+    
     c1, c2 = st.columns(2)
-    c1.success(f"**Michael**\n\n${MIKE_SS[m_claim_yr]:,.0f} / yr (Starts {m_claim_yr})")
-    c2.success(f"**Stephanie**\n\n${STEPH_SS[s_claim_yr]:,.0f} / yr (Starts {s_claim_yr})")
+    c1.success(f"**Michael (Starts {m_claim_yr})**\n\nNominal: **${MIKE_SS[m_claim_yr]:,.0f}** / yr\n\nReal (2026 $): **${m_real_ss:,.0f}** / yr")
+    c2.success(f"**Stephanie (Starts {s_claim_yr})**\n\nNominal: **${STEPH_SS[s_claim_yr]:,.0f}** / yr\n\nReal (2026 $): **${s_real_ss:,.0f}** / yr")
 
 # -----------------------------------------------------------------------------
 # 7. CASH FLOW & SLOVENIAN DRIP
 # -----------------------------------------------------------------------------
-elif selection == "7. Cash Flow & Slovenian Drip":
+elif selection == "7. CASH FLOW & SLOVENIAN DRIP":
     st.header("7. Cash Flow & Multi-Period Optimization Engine")
-    _, df_draw, df_tax = run_core_simulation()
+    _, df_draw, df_tax, _ = run_core_simulation()
     start_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
     
     st.markdown("---")
     st.subheader("1a. Yearly Future Projected Draw by Asset Ledger (Nominal $)")
-    st.dataframe(df_draw.style.format("${:,.0f}"), use_container_width=True, height=600)
+    st.dataframe(df_draw.style.format("${:,.0f}"), use_container_width=True, height=765)
     
     st.markdown("---")
     st.subheader("1b. Yearly Future Projected Draw by Asset Ledger (Real 2026 $)")
-    df_draw_real = df_draw.copy()
+    
     inf_rate = st.session_state.inflation_rate / 100.0
-    for yr in df_draw_real.columns:
-        if yr in df_draw_real.columns and not isinstance(df_draw_real[yr], str):
-            df_draw_real[yr] = df_draw_real[yr] / ((1 + inf_rate) ** (yr - 2026))
-    st.dataframe(df_draw_real.style.format("${:,.0f}"), use_container_width=True, height=600)
+    discount_factors = np.array([(1 + inf_rate) ** (yr - 2026) for yr in df_draw.columns])
+    df_draw_real = df_draw.div(discount_factors, axis=1)
+    
+    st.dataframe(df_draw_real.style.format("${:,.0f}"), use_container_width=True, height=765)
     
     st.markdown("---")
     st.subheader("2. Yearly Effective Tax Rate")
@@ -821,8 +925,8 @@ elif selection == "7. Cash Flow & Slovenian Drip":
     st.subheader("3. Generational Wealth Transfer (Giving While Living) Summary")
     
     if start_yr in df_draw.columns:
-        gift_nominal = df_draw.loc["Actual Generational Drip"]
-        gift_real = df_draw_real.loc["Actual Generational Drip"]
+        gift_nominal = df_draw.loc["Actual Generational Drip", start_yr:]
+        gift_real = df_draw_real.loc["Actual Generational Drip", start_yr:]
         
         df_gift_summary = pd.DataFrame({
             "Nominal Annual Gift": gift_nominal,
@@ -835,10 +939,10 @@ elif selection == "7. Cash Flow & Slovenian Drip":
         
         if not df_gift_active.empty:
             c1, c2 = st.columns(2)
-            c1.metric("Total Lifetime Gift (Nominal)", f"${df_gift_active['Cumulative Nominal Gift'].iloc[-1]:,.0f}")
-            c2.metric("Total Lifetime Gift (Real 2026 $)", f"${df_gift_active['Cumulative Real Gift'].iloc[-1]:,.0f}")
+            c1.metric("Total Lifetime Gift (Nominal)", f"${df_gift_summary['Cumulative Nominal Gift'].iloc[-1]:,.0f}")
+            c2.metric("Total Lifetime Gift (Real 2026 $)", f"${df_gift_summary['Cumulative Real Gift'].iloc[-1]:,.0f}")
             
-            fig_gift = px.bar(df_gift_active, y=["Nominal Annual Gift", "Real Annual Gift (2026 $)"], barmode='group')
+            fig_gift = px.bar(df_gift_summary, y=["Nominal Annual Gift", "Real Annual Gift (2026 $)"], barmode='group')
             fig_gift.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), xaxis_title="Year", yaxis_title="Gift Amount ($)")
             st.plotly_chart(fig_gift, use_container_width=True)
             
@@ -851,7 +955,7 @@ elif selection == "7. Cash Flow & Slovenian Drip":
 # -----------------------------------------------------------------------------
 elif selection == "8. Yearly Balances (2026-2089)":
     st.header("8. Yearly Balances (2026-2089)")
-    df_bal, _, _ = run_core_simulation()
+    df_bal, _, _, _ = run_core_simulation()
     chart_bals = df_bal.drop("Total Portfolio Balance").T
     fig3 = px.bar(chart_bals, barmode='stack')
     fig3.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), xaxis_title="", yaxis_title="Balance ($)")
@@ -871,11 +975,11 @@ elif selection == "9. Tax Torpedo Optimizer":
         with st.spinner("Running thousands of actuarial permutations..."):
             results = []
             ss_ages = [62, 63, 64, 65, 66, 67, 68, 69, 70]
-            draw_amounts = [0, 25000, 50000, 75000, 100000, 125000, 150000]
+            draw_amounts = [0, 50000, 100000, 125000, 150000, 175000, 200000]
             
             for ss in ss_ages:
                 for draw in draw_amounts:
-                    _, df_draw, _ = run_core_simulation(override_m_age=ss, override_s_age=ss, override_early_draw=draw)
+                    _, df_draw, _, _ = run_core_simulation(override_m_age=ss, override_s_age=ss, override_early_draw=draw)
                     df_draw_t = df_draw.T
                     
                     if 'Less: Taxes Paid' in df_draw_t.columns:
@@ -925,6 +1029,11 @@ elif selection == "10. Institutional Stress Testing":
     st.session_state.usd_glide_reduction = g4.number_input("Yearly Reduction in USD Return (%)", value=st.session_state.usd_glide_reduction, step=0.001, format="%.3f")
     st.session_state.eur_glide_reduction = g5.number_input("Yearly Reduction in EUR Return (%)", value=st.session_state.eur_glide_reduction, step=0.001, format="%.3f")
 
+    if st.session_state.glide_enable:
+        total_usd_drop = (st.session_state.glide_end_age - st.session_state.glide_start_age + 1) * st.session_state.usd_glide_reduction
+        total_eur_drop = (st.session_state.glide_end_age - st.session_state.glide_start_age + 1) * st.session_state.eur_glide_reduction
+        st.info(f"**Status:** Active. By age {st.session_state.glide_end_age}, your USD return will drop to **{st.session_state.usd_market_return - total_usd_drop:.3f}%** and your EUR return will drop to **{st.session_state.eur_market_return - total_eur_drop:.3f}%**.")
+
     st.markdown("---")
     st.subheader("B. Sequence of Returns Risk (SORR)")
     st.markdown("Simulate a devastating, multi-year market crash at a specific point in time to see if early portfolio damage bankrupts your long-term plan.")
@@ -943,7 +1052,7 @@ elif selection == "10. Institutional Stress Testing":
 
     if st.button("Run Stress Test Diagnostics"):
         with st.spinner("Stress testing portfolio parameters..."):
-            df_bal, _, _ = run_core_simulation()
+            df_bal, _, _, _ = run_core_simulation()
             final_yr = 2089
             if final_yr in df_bal.columns and df_bal.loc['Total Portfolio Balance', final_yr] > 0:
                 final_val = df_bal.loc['Total Portfolio Balance', final_yr]
