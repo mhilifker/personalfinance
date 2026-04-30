@@ -62,8 +62,8 @@ if 'spend_wind' not in st.session_state: st.session_state.spend_wind = 100000
 
 # Guardrails & Dynamic Gifting
 if 'guardrails_enable' not in st.session_state: st.session_state.guardrails_enable = True
-if 'floor_golden' not in st.session_state: st.session_state.floor_golden = 65000
-if 'floor_middle' not in st.session_state: st.session_state.floor_middle = 75000
+if 'floor_golden' not in st.session_state: st.session_state.floor_golden = 85000
+if 'floor_middle' not in st.session_state: st.session_state.floor_middle = 85000
 if 'floor_wind' not in st.session_state: st.session_state.floor_wind = 100000
 if 'slash_trigger' not in st.session_state: st.session_state.slash_trigger = 5.25
 if 'recovery_trigger' not in st.session_state: st.session_state.recovery_trigger = 4.25
@@ -103,7 +103,7 @@ if 'asset_balances' not in st.session_state:
 if 'policy_df' not in st.session_state:
     st.session_state.policy_df = pd.DataFrame({
         "Asset Category": list(st.session_state.asset_balances.keys()),
-        "Annual Savings Escalator (%)": [0.0, 0.5, 0.5, 0.0, -20.0, 0.5, 0.0, 0.0, 0.5, 0.0],
+        "Annual Savings Escalator (%)": [0.0, 0.0, 0.0, 0.0, -20.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "Current State": [0, 30000, 30000, 0, 15000, 18000, 0, 0, 8300, 0],
         "Northbrook Grind": [0, 15000, 30000, 0, 15000, 18000, 0, 0, 0, 0]
     })
@@ -709,7 +709,7 @@ if selection == "1. Executive Dashboard":
             y=df_conts_t['Total Real Savings (2026 $)'], 
             name="Total Real Savings (2026 $)", 
             mode='lines+markers', 
-            line=dict(color='red', width=3)
+            line=dict(color='gold', width=4)
         ))
         
         fig3.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), xaxis_title="Year", yaxis_title="Savings / Contributions ($)", hovermode="x unified")
