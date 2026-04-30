@@ -709,7 +709,7 @@ if selection == "1. Executive Dashboard":
             y=df_conts_t['Total Real Savings (2026 $)'], 
             name="Total Real Savings (2026 $)", 
             mode='lines+markers', 
-            line=dict(color='gold', width=3)
+            line=dict(color='red', width=3)
         ))
         
         fig3.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), xaxis_title="Year", yaxis_title="Savings / Contributions ($)", hovermode="x unified")
@@ -718,7 +718,7 @@ if selection == "1. Executive Dashboard":
         st.info("You are already in or past the retirement phase. No pre-retirement savings projected.")
 
 # -----------------------------------------------------------------------------
-# 2. PRE-SET ASSET LEDGER & TAX LOTS
+# 2. PRE-SET ASSET Ledger & Tax Lots
 # -----------------------------------------------------------------------------
 elif selection == "2. Pre-Set Asset Ledger & Tax Lots":
     st.header("2. Pre-Set Asset Ledger & Tax Lots")
@@ -890,9 +890,9 @@ elif selection == "6. Social Security & Pensions":
 # -----------------------------------------------------------------------------
 # 7. CASH FLOW & SLOVENIAN DRIP
 # -----------------------------------------------------------------------------
-elif selection == "7. CASH FLOW & SLOVENIAN DRIP":
+elif selection == "7. Cash Flow & Slovenian Drip":
     st.header("7. Cash Flow & Multi-Period Optimization Engine")
-    _, df_draw, df_tax, _ = run_core_simulation()
+    _, df_draw, df_tax, _, _ = run_core_simulation()
     start_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
     
     st.markdown("---")
@@ -955,7 +955,7 @@ elif selection == "7. CASH FLOW & SLOVENIAN DRIP":
 # -----------------------------------------------------------------------------
 elif selection == "8. Yearly Balances (2026-2089)":
     st.header("8. Yearly Balances (2026-2089)")
-    df_bal, _, _, _ = run_core_simulation()
+    df_bal, _, _, _, _ = run_core_simulation()
     chart_bals = df_bal.drop("Total Portfolio Balance").T
     fig3 = px.bar(chart_bals, barmode='stack')
     fig3.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), xaxis_title="", yaxis_title="Balance ($)")
@@ -979,7 +979,7 @@ elif selection == "9. Tax Torpedo Optimizer":
             
             for ss in ss_ages:
                 for draw in draw_amounts:
-                    _, df_draw, _, _ = run_core_simulation(override_m_age=ss, override_s_age=ss, override_early_draw=draw)
+                    _, df_draw, _, _, _ = run_core_simulation(override_m_age=ss, override_s_age=ss, override_early_draw=draw)
                     df_draw_t = df_draw.T
                     
                     if 'Less: Taxes Paid' in df_draw_t.columns:
@@ -1052,7 +1052,7 @@ elif selection == "10. Institutional Stress Testing":
 
     if st.button("Run Stress Test Diagnostics"):
         with st.spinner("Stress testing portfolio parameters..."):
-            df_bal, _, _, _ = run_core_simulation()
+            df_bal, _, _, _, _ = run_core_simulation()
             final_yr = 2089
             if final_yr in df_bal.columns and df_bal.loc['Total Portfolio Balance', final_yr] > 0:
                 final_val = df_bal.loc['Total Portfolio Balance', final_yr]
