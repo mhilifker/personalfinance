@@ -71,15 +71,15 @@ if 'cola_rate' not in st.session_state: st.session_state.cola_rate = 2.1
 if 'awi_rate' not in st.session_state: st.session_state.awi_rate = 3.5
 
 # Spending Targets (2026 Dollars)
-if 'spend_golden' not in st.session_state: st.session_state.spend_golden = 144000
-if 'spend_middle' not in st.session_state: st.session_state.spend_middle = 110000
-if 'spend_wind' not in st.session_state: st.session_state.spend_wind = 100000
+if 'spend_golden' not in st.session_state: st.session_state.spend_golden = 127000
+if 'spend_middle' not in st.session_state: st.session_state.spend_middle = 98000
+if 'spend_wind' not in st.session_state: st.session_state.spend_wind = 85000
 
 # Guardrails & Dynamic Gifting
 if 'guardrails_enable' not in st.session_state: st.session_state.guardrails_enable = True
-if 'floor_golden' not in st.session_state: st.session_state.floor_golden = 85000
-if 'floor_middle' not in st.session_state: st.session_state.floor_middle = 85000
-if 'floor_wind' not in st.session_state: st.session_state.floor_wind = 100000
+if 'floor_golden' not in st.session_state: st.session_state.floor_golden = 72000
+if 'floor_middle' not in st.session_state: st.session_state.floor_middle = 72000
+if 'floor_wind' not in st.session_state: st.session_state.floor_wind = 72000
 if 'slash_trigger' not in st.session_state: st.session_state.slash_trigger = 5.25
 if 'recovery_trigger' not in st.session_state: st.session_state.recovery_trigger = 4.25
 if 'raise_pct' not in st.session_state: st.session_state.raise_pct = 33.0
@@ -106,7 +106,7 @@ if 'mc_block_len' not in st.session_state: st.session_state.mc_block_len = 5
 # or as the raw ARITHMETIC mean of annual returns (realized compounding is then lower).
 if 'mc_mean_type' not in st.session_state: st.session_state.mc_mean_type = "Compound (CAGR) target"
 # Explicit lifetime gifting goal (real 2026 $) to measure "gift success" against in MC.
-if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 750000
+if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 1500000
 # Multi-factor stress toggles and parameters for the Monte Carlo.
 if 'mc_stoch_inflation' not in st.session_state: st.session_state.mc_stoch_inflation = True
 if 'mc_infl_vol' not in st.session_state: st.session_state.mc_infl_vol = 1.5
@@ -550,7 +550,13 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         # Update phantom ledger for next year's smoothed calculation
         cumulative_gifts_tracker = cumulative_gifts_tracker * (1 + usd_yr_return) + actual_gift_usd
         
-        target_lifestyle_eur = actual_lifestyle_usd / current_fx if not is_slovenia else actual_lifestyle_usd
+        # Spend inputs are denominated in today's USD purchasing power. Convert to the
+        # euros actually needed in Slovenia by dividing by the FX multiplier (current_fx is
+        # 1.0 pre-move, the EUR-funding rate post-move). Slovenia's lower price level then
+        # surfaces naturally as lifestyle headroom rather than a separate PPP discount.
+        # This now matches how gifts and SS are already converted (previously lifestyle was
+        # inconsistently spent 1:1 as euros after the move).
+        target_lifestyle_eur = actual_lifestyle_usd / current_fx
         gift_need_eur = actual_gift_usd / current_fx
         ss_eur_equivalent = net_ss_usd / current_fx
         
@@ -969,11 +975,24 @@ elif selection == "3. Investment Policy Editor":
     st.session_state.policy_df = edited_policy
 
     st.markdown("---")
-    st.subheader("Retirement Phase Lifestyle Targets (Today's 2026 Dollars)")
+    st.subheader("Retirement Phase Lifestyle Targets (Today's USD Purchasing Power)")
+    st.caption(
+        "Enter what you'd spend in **today's US dollars**. After the move, the model converts "
+        "to the euros actually needed in Slovenia by dividing by the exchange rate "
+        f"(~{st.session_state.fx_rate:.2f}). Slovenia's lower cost of living then shows up as "
+        "lifestyle headroom. For reference, a comfortable family-of-four budget in Slovenia is "
+        "~€50k/yr, so amounts above that fund travel and discretionary spending."
+    )
     r1, r2, r3 = st.columns(3)
     st.session_state.spend_golden = r1.number_input("Golden Years (< 70)", value=st.session_state.spend_golden, step=5000)
     st.session_state.spend_middle = r2.number_input("Middle Phase (70-85)", value=st.session_state.spend_middle, step=5000)
     st.session_state.spend_wind = r3.number_input("Wind Down Years (85-100)", value=st.session_state.spend_wind, step=5000)
+    _fx = st.session_state.fx_rate
+    st.caption(
+        f"≈ Slovenia euro equivalents:  Golden €{st.session_state.spend_golden/_fx:,.0f}  |  "
+        f"Middle €{st.session_state.spend_middle/_fx:,.0f}  |  Wind-down €{st.session_state.spend_wind/_fx:,.0f}  "
+        f"(of which ~€50k is a comfortable base, the rest travel/discretionary)."
+    )
 
 # -----------------------------------------------------------------------------
 # 4. REAL ESTATE & RELOCATION
