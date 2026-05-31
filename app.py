@@ -106,7 +106,7 @@ if 'mc_block_len' not in st.session_state: st.session_state.mc_block_len = 5
 # or as the raw ARITHMETIC mean of annual returns (realized compounding is then lower).
 if 'mc_mean_type' not in st.session_state: st.session_state.mc_mean_type = "Compound (CAGR) target"
 # Explicit lifetime gifting goal (real 2026 $) to measure "gift success" against in MC.
-if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 750000
+if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 1500000
 # Multi-factor stress toggles and parameters for the Monte Carlo.
 if 'mc_stoch_inflation' not in st.session_state: st.session_state.mc_stoch_inflation = True
 if 'mc_infl_vol' not in st.session_state: st.session_state.mc_infl_vol = 1.5
@@ -1953,26 +1953,28 @@ elif selection == "12. Monte Carlo Simulation":
             e = t_eh[idx] - t_eh[idx].mean() + t_em
             return u, e
 
-        def t_scenario(flag, usd, eur, rng):
+        def t_scenario(flags, usd, eur, rng):
+            # flags: a set/list of factor keys to apply together (enables pair interactions).
+            flags = set(flags) if flags else set()
             sc = {}
-            if flag == 'inflation':
+            if 'inflation' in flags:
                 infl = {}; em = np.mean(usd); es = np.std(usd) or 1e-9
                 ic = st.session_state.mc_infl_equity_corr; iv = st.session_state.mc_infl_vol/100.0
                 for i, y in enumerate(t_years):
                     z = (usd[i]-em)/es
                     infl[y] = max(-0.02, t_inf + ic*z*iv + np.sqrt(max(0,1-ic**2))*rng.normal(0,iv))
                 sc['inflation'] = infl
-            elif flag == 'fx':
+            if 'fx' in flags:
                 fxv = st.session_state.mc_fx_vol/100.0; lvl = st.session_state.fx_rate; fx = {}
                 for y in t_years:
                     lvl *= np.exp(rng.normal(0, fxv)); fx[y] = lvl
                 sc['fx'] = fx
-            elif flag == 'longevity':
+            if 'longevity' in flags:
                 ds = sample_death_age(t_start, SURV_MALE, rng)
                 dp = sample_death_age(t_start - st.session_state.mc_wife_age_offset, SURV_FEMALE, rng)
                 sy = 2026 + (ds - t_start); py = 2026 + (dp - (t_start - st.session_state.mc_wife_age_offset))
                 sc['death_year'] = min(2089, max(sy, py))
-            elif flag == 'ltc':
+            if 'ltc' in flags:
                 ltc = {}
                 for _ in range(2):
                     if rng.random() < st.session_state.mc_ltc_prob:
@@ -1980,31 +1982,29 @@ elif selection == "12. Monte Carlo Simulation":
                         for k in range(int(st.session_state.mc_ltc_years)):
                             if oy+k <= 2089: ltc[oy+k] = ltc.get(oy+k,0)+st.session_state.mc_ltc_cost
                 if ltc: sc['ltc_cost'] = ltc
-            elif flag == 'tax':
+            if 'tax' in flags:
                 sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
-            elif flag == 'ss':
+            if 'ss' in flags:
                 if rng.random() < st.session_state.mc_ss_haircut_prob:
                     sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
             return sc
 
-        def t_run(flag, n, seed=12345):
-            # Common random numbers: equity paths use a FIXED seed across all factor runs,
-            # so the baseline and each factor see identical markets and the only difference
-            # is the factor itself. Factor draws use a separate stream.
+        def t_run(flags, n, seed=12345):
+            # Common random numbers: equity paths AND factor draws use fixed seeds across all
+            # runs, so baseline, singles and pairs see identical markets and factor realizations.
+            # This is what makes the interaction signal trustworthy rather than MC noise.
             eq_rng = np.random.default_rng(seed)
             fac_rng = np.random.default_rng(seed + 7777)
             joint_ok = 0
             for _ in range(n):
                 usd, eur = t_make(eq_rng)
-                sc = t_scenario(flag, usd, eur, fac_rng) if flag else {}
+                sc = t_scenario(flags, usd, eur, fac_rng) if flags else {}
                 sc['returns'] = {t_years[i]: (float(usd[i]), float(eur[i])) for i in range(t_n)}
                 db, dd, _, _, _ = run_core_simulation(scenario=sc)
                 tot = db.loc['Total Portfolio Balance']
-                # Success = money outlasts the household (solvent through death year / 100).
                 horizon = sc.get('death_year', 2089)
                 depl = tot[tot <= 0]
                 nd = (len(depl) == 0) or (depl.index.min() > horizon)
-                # per-path real discount
                 if 'inflation' in sc:
                     dm = {}; cpi = 1.0
                     for y in t_years:
@@ -2038,7 +2038,7 @@ elif selection == "12. Monte Carlo Simulation":
         for i, (flag, label, enabled) in enumerate(factors):
             if not enabled:
                 continue
-            rate = t_run(flag, tn)
+            rate = t_run([flag], tn)
             results.append((label, rate - baseline))
             prog.progress((i+2)/8, text=f"{label} done")
         prog.progress(1.0, text="Complete.")
@@ -2060,9 +2060,192 @@ elif selection == "12. Monte Carlo Simulation":
             worst = results[0]
             st.caption(
                 f"Your plan is most fragile to **{worst[0]}** ({worst[1]:+.1f} pts). Factors are tested "
-                "one at a time against an equity-only baseline, so they don't include interaction effects "
-                "(the combined simulation above captures those). Enable factors in the panel above to "
-                "include them here."
+                "one at a time against an equity-only baseline. Interactions between factors are NOT in "
+                "these bars \u2014 the interaction matrix below quantifies how much worse pairs are together "
+                "than the sum of their individual bars."
             )
         else:
             st.info("No stress factors are enabled. Turn some on in the Stress Factors panel above.")
+
+    # ======================================================================
+    # INTERACTION MATRIX: how much worse are factor PAIRS than the sum of parts
+    # ======================================================================
+    st.markdown("---")
+    st.subheader("Interaction Matrix (Compounding Risk Between Factors)")
+    st.markdown(
+        "The tornado tests factors one at a time. This matrix asks a deeper question: do two "
+        "risks **compound** when they hit together? Each off-diagonal cell shows the "
+        "*interaction effect* = (success with both) \u2212 (success with A alone) \u2212 (success with B "
+        "alone) + baseline. A strongly **negative** cell means the pair is more dangerous together "
+        "than their individual tornado bars predict (e.g. a stock crash *and* high inflation at "
+        "once). Near-zero means the two are roughly independent. The diagonal shows each factor's "
+        "solo impact for reference."
+    )
+    matrix_runs = st.number_input("Simulations per cell (lower = faster; 16 cells)", value=300, min_value=100, max_value=1500, step=100, key="matrix_runs")
+    st.caption("Note: a 5-factor matrix runs baseline + 5 singles + 10 pairs = 16 batches. At 300 paths that's ~4,800 full simulations; expect this to take a bit.")
+
+    if st.button("Run Interaction Matrix"):
+        im_years = list(range(2026, 2090)); im_n = len(im_years)
+        im_inf = st.session_state.inflation_rate / 100.0
+        im_start = st.session_state.current_age
+        im_ret_start = 2026 + (st.session_state.ret_age - st.session_state.current_age)
+        im_ret_years = [y for y in im_years if y >= im_ret_start]
+        im_gift_goal = float(st.session_state.mc_gift_goal)
+        def im_tgt(a):
+            return st.session_state.spend_golden if a < 70 else (st.session_state.spend_middle if a < 85 else st.session_state.spend_wind)
+        im_tmap = {y: im_tgt(im_start + (y - 2026)) for y in im_ret_years}
+
+        im_common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
+        im_uh = np.array([SP500_BY_YEAR[y] for y in im_common]) / 100.0
+        im_eh = np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in im_common]) / 100.0
+        im_block = int(st.session_state.mc_block_len); im_nb = len(im_common) - im_block + 1
+        im_um = st.session_state.usd_market_return/100.0 + np.var(im_uh)/2
+        im_em = st.session_state.eur_market_return/100.0 + np.var(im_eh)/2
+
+        def im_make(rng):
+            idx = []
+            while len(idx) < im_n:
+                s = rng.integers(0, im_nb); idx.extend(range(s, s + im_block))
+            idx = np.array(idx[:im_n])
+            return im_uh[idx]-im_uh[idx].mean()+im_um, im_eh[idx]-im_eh[idx].mean()+im_em
+
+        def im_scenario(flags, usd, rng):
+            flags = set(flags); sc = {}
+            if 'inflation' in flags:
+                infl = {}; em = np.mean(usd); es = np.std(usd) or 1e-9
+                ic = st.session_state.mc_infl_equity_corr; iv = st.session_state.mc_infl_vol/100.0
+                for i, y in enumerate(im_years):
+                    infl[y] = max(-0.02, im_inf + ic*((usd[i]-em)/es)*iv + np.sqrt(max(0,1-ic**2))*rng.normal(0,iv))
+                sc['inflation'] = infl
+            if 'fx' in flags:
+                fxv = st.session_state.mc_fx_vol/100.0; lvl = st.session_state.fx_rate; fx = {}
+                for y in im_years:
+                    lvl *= np.exp(rng.normal(0, fxv)); fx[y] = lvl
+                sc['fx'] = fx
+            if 'ltc' in flags:
+                ltc = {}
+                for _ in range(2):
+                    if rng.random() < st.session_state.mc_ltc_prob:
+                        oy = 2026 + (int(rng.integers(78,90)) - im_start)
+                        for k in range(int(st.session_state.mc_ltc_years)):
+                            if oy+k <= 2089: ltc[oy+k] = ltc.get(oy+k,0)+st.session_state.mc_ltc_cost
+                if ltc: sc['ltc_cost'] = ltc
+            if 'tax' in flags:
+                sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
+            if 'ss' in flags:
+                if rng.random() < st.session_state.mc_ss_haircut_prob:
+                    sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
+            return sc
+
+        def im_run(flags, n, seed=2024):
+            eq = np.random.default_rng(seed); fac = np.random.default_rng(seed + 7777)
+            ok = 0
+            for _ in range(n):
+                usd, eur = im_make(eq)
+                sc = im_scenario(flags, usd, fac) if flags else {}
+                sc['returns'] = {im_years[i]: (float(usd[i]), float(eur[i])) for i in range(im_n)}
+                db, dd, _, _, _ = run_core_simulation(scenario=sc)
+                tot = db.loc['Total Portfolio Balance']
+                horizon = sc.get('death_year', 2089); depl = tot[tot <= 0]
+                nd = (len(depl) == 0) or (depl.index.min() > horizon)
+                if 'inflation' in sc:
+                    dm = {}; cpi = 1.0
+                    for y in im_years:
+                        if y > 2026: cpi *= (1+sc['inflation'][y])
+                        dm[y] = cpi
+                else:
+                    dm = {y:(1+im_inf)**(y-2026) for y in im_years}
+                life = dd.loc["Actual Lifestyle Spend"]; gift = dd.loc["Actual Generational Drip"]
+                stgt = sum(im_tmap[y] for y in im_ret_years) or 1.0
+                ar = sum(life.get(y,0)/dm[y] for y in im_ret_years)
+                full = (ar/stgt) >= 0.95
+                gtot = sum(gift.get(y,0)/dm[y] for y in im_ret_years)
+                if nd and full and gtot >= im_gift_goal: ok += 1
+            return 100.0 * ok / n
+
+        # Only include factors the user has enabled (longevity excluded by design).
+        all_factors = [
+            ('inflation', 'Inflation', st.session_state.mc_stoch_inflation),
+            ('fx', 'FX', st.session_state.mc_stoch_fx),
+            ('ltc', 'LTC', st.session_state.mc_ltc_enable),
+            ('tax', 'Tax', st.session_state.mc_tax_regime),
+            ('ss', 'SS Cut', st.session_state.mc_ss_haircut_prob > 0),
+        ]
+        active = [(f, lbl) for (f, lbl, en) in all_factors if en]
+
+        if len(active) < 2:
+            st.info("Enable at least two stress factors (in the panel above) to compute interactions.")
+        else:
+            mn = int(st.session_state.matrix_runs)
+            keys = [f for f, _ in active]; labels = [lbl for _, lbl in active]
+            total_cells = 1 + len(keys) + len(keys)*(len(keys)-1)//2
+            prog = st.progress(0.0, text="Computing matrix...")
+            done = 0
+            base = im_run([], mn); done += 1; prog.progress(done/total_cells, text="Baseline done")
+            singles = {}
+            for k in keys:
+                singles[k] = im_run([k], mn); done += 1
+                prog.progress(done/total_cells, text=f"{k} solo done")
+            pair_combined = {}
+            for a in range(len(keys)):
+                for b in range(a+1, len(keys)):
+                    ka, kb = keys[a], keys[b]
+                    pair_combined[(ka, kb)] = im_run([ka, kb], mn); done += 1
+                    prog.progress(min(1.0, done/total_cells), text=f"{ka}+{kb} done")
+            prog.progress(1.0, text="Complete.")
+
+            # Build matrices: diagonal = solo impact (single - base); off-diag = interaction.
+            nF = len(keys)
+            Z = np.full((nF, nF), np.nan)
+            text = [["" for _ in range(nF)] for _ in range(nF)]
+            for i in range(nF):
+                solo_i = singles[keys[i]] - base
+                Z[i][i] = solo_i
+                text[i][i] = f"solo<br>{solo_i:+.1f}"
+                for j in range(nF):
+                    if i == j: continue
+                    ka, kb = keys[min(i,j)], keys[max(i,j)]
+                    both = pair_combined[(ka, kb)]
+                    inter = (both - base) - (singles[ka] - base) - (singles[kb] - base)
+                    Z[i][j] = inter
+                    text[i][j] = f"{inter:+.1f}"
+
+            import plotly.graph_objects as _go
+            fig_m = _go.Figure(data=_go.Heatmap(
+                z=Z, x=labels, y=labels, text=text, texttemplate="%{text}",
+                colorscale=[[0,'#b2182b'],[0.5,'#f7f7f7'],[1,'#2166ac']], zmid=0,
+                colorbar=dict(title="Effect (pts)"),
+                hovertemplate="%{y} \u00d7 %{x}<br>Effect: %{z:+.1f} pts<extra></extra>"
+            ))
+            fig_m.update_layout(
+                title="Interaction Effects on Joint-Success (off-diagonal) & Solo Impact (diagonal)",
+                height=480, yaxis=dict(autorange='reversed'), margin=dict(l=10,r=10,t=50,b=10)
+            )
+            st.plotly_chart(fig_m, use_container_width=True)
+
+            # Find the strongest compounding pair.
+            worst_pair = None; worst_val = 0.0
+            for (ka, kb), both in pair_combined.items():
+                inter = (both - base) - (singles[ka] - base) - (singles[kb] - base)
+                if inter < worst_val:
+                    worst_val = inter; worst_pair = (ka, kb)
+            st.metric("Baseline Joint-Success (equity only)", f"{base:.1f}%")
+            if worst_pair and worst_val < -1.0:
+                lbl_map = dict(active)
+                st.warning(
+                    f"Strongest compounding pair: **{lbl_map[worst_pair[0]]} + {lbl_map[worst_pair[1]]}** "
+                    f"({worst_val:.1f} pts beyond the sum of their individual effects). These two risks "
+                    "reinforce each other and deserve a dedicated hedge or larger cash buffer."
+                )
+            else:
+                st.success(
+                    "No strong compounding pairs detected: the factors behave roughly independently, so "
+                    "the tornado bars already capture most of the risk. (Interactions within ~1 pt are "
+                    "indistinguishable from Monte Carlo noise at this path count.)"
+                )
+            st.caption(
+                "Blue = the pair is *less* bad together than the sum of parts (mild offsetting); red = "
+                "*more* bad together (compounding). Built with common random numbers so the interaction "
+                "signal isn't swamped by sampling noise. Longevity is excluded (it shifts the success "
+                "horizon rather than acting as a shock). Raise simulations-per-cell to sharpen faint signals."
+            )
