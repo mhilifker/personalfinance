@@ -105,6 +105,8 @@ if 'mc_block_len' not in st.session_state: st.session_state.mc_block_len = 5
 # target the portfolio should realize on average (intuitive; engine adds back vol drag),
 # or as the raw ARITHMETIC mean of annual returns (realized compounding is then lower).
 if 'mc_mean_type' not in st.session_state: st.session_state.mc_mean_type = "Compound (CAGR) target"
+# Explicit lifetime gifting goal (real 2026 $) to measure "gift success" against in MC.
+if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 1500000
 
 # S&P 500 annual total returns (%) 1928-2025 (dividends reinvested; Damodaran/NYU
 # Stern series, recent years per Macrotrends). Used by the block-bootstrap engine to
@@ -1248,6 +1250,12 @@ elif selection == "12. Monte Carlo Simulation":
              "lower because of volatility drag."
     )
 
+    st.session_state.mc_gift_goal = st.number_input(
+        "Lifetime Gifting Goal (Real 2026 $)", value=st.session_state.mc_gift_goal, step=100000,
+        help="Total real generational gift you'd consider a success. Used for the gifting "
+             "success rate and the joint-success metric below."
+    )
+
     m1, m2, m3 = st.columns(3)
     st.session_state.mc_runs = m1.number_input("Number of Simulations", value=st.session_state.mc_runs, min_value=100, max_value=5000, step=100)
     st.session_state.mc_seed = m2.number_input("Random Seed (reproducibility)", value=st.session_state.mc_seed, step=1)
@@ -1338,12 +1346,32 @@ elif selection == "12. Monte Carlo Simulation":
         real_paths = np.full((n_runs, n_years), np.nan)
         success = 0
         start_age = st.session_state.current_age
+        ret_start_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
+
+        # Target lifestyle in REAL 2026 $ is constant within each age band (golden/middle/
+        # wind-down); recompute per retirement year so we can score actual vs target.
+        def target_real_by_age(a):
+            if a < 70: return st.session_state.spend_golden
+            elif a < 85: return st.session_state.spend_middle
+            else: return st.session_state.spend_wind
+        ret_years = [y for y in years if y >= ret_start_yr]
+        target_real_map = {y: target_real_by_age(start_age + (y - 2026)) for y in ret_years}
+        total_target_real = sum(target_real_map.values())
+        gift_goal = float(st.session_state.mc_gift_goal)
+
+        # Per-path collectors for the new insight groups.
+        lifetime_gift_real = []      # total real generational gift per path
+        lifestyle_funded_ratio = []  # achieved real lifestyle / target, over retirement
+        years_below_target = []      # count of retirement years with a meaningful cut
+        full_lifestyle_path = []     # bool: avg funded ratio >= 95%
+        first_cut_age = []           # age of first lifestyle cut (np.nan if none)
+        worst_drawdown = []          # largest peak-to-trough real drop per path
 
         progress = st.progress(0.0, text="Running simulations...")
         for run in range(n_runs):
             usd_draws, eur_draws = make_paths()
             overrides = {years[i]: (float(usd_draws[i]), float(eur_draws[i])) for i in range(n_years)}
-            df_bal, _, _, _, _ = run_core_simulation(return_overrides=overrides)
+            df_bal, df_draw, _, _, _ = run_core_simulation(return_overrides=overrides)
             total = df_bal.loc['Total Portfolio Balance']
 
             real_series = np.array([total[y] / ((1 + inf_rate) ** (y - 2026)) for y in years])
@@ -1357,13 +1385,67 @@ elif selection == "12. Monte Carlo Simulation":
                 depletion_ages.append(100)
             terminal_real.append(real_series[-1])
 
+            # --- Lifestyle quality (real 2026 $) ---
+            life_nom = df_draw.loc["Actual Lifestyle Spend"]
+            gift_nom = df_draw.loc["Actual Generational Drip"]
+            achieved_real_total = 0.0
+            cut_count = 0
+            first_cut = np.nan
+            for y in ret_years:
+                disc = (1 + inf_rate) ** (y - 2026)
+                achieved_real = life_nom.get(y, 0.0) / disc
+                achieved_real_total += achieved_real
+                tgt = target_real_map[y]
+                if tgt > 0 and achieved_real < 0.99 * tgt:  # 1% tolerance = a real cut
+                    cut_count += 1
+                    if np.isnan(first_cut):
+                        first_cut = start_age + (y - 2026)
+            ratio = (achieved_real_total / total_target_real) if total_target_real > 0 else 0.0
+            lifestyle_funded_ratio.append(ratio)
+            years_below_target.append(cut_count)
+            full_lifestyle_path.append(ratio >= 0.95)
+            first_cut_age.append(first_cut)
+
+            # --- Gifting (real 2026 $) ---
+            gift_total_real = sum(gift_nom.get(y, 0.0) / ((1 + inf_rate) ** (y - 2026)) for y in ret_years)
+            lifetime_gift_real.append(gift_total_real)
+
+            # --- Worst market shock experienced in the path ---
+            # A deliberate spend-down plan drives the real balance toward ~0 by age 100 by
+            # design, so a portfolio peak-to-trough mostly measures intended decumulation,
+            # not risk. Instead we capture the worst MARKET shock the path actually drew:
+            # the single worst year and the worst 3-year cumulative real-equity return
+            # (USD sleeve), which is the sequence risk that endangers the plan.
+            usd_real = np.array([usd_draws[i] - inf_rate for i in range(n_years)])
+            worst_1yr = float(usd_real.min())
+            if n_years >= 3:
+                cum3 = [np.prod(1 + usd_real[i:i+3]) - 1 for i in range(n_years - 2)]
+                worst_3yr = float(min(cum3))
+            else:
+                worst_3yr = worst_1yr
+            worst_drawdown.append((worst_1yr, worst_3yr))
+
             if run % max(1, n_runs // 50) == 0:
                 progress.progress(run / n_runs, text=f"Running simulations... {run}/{n_runs}")
         progress.progress(1.0, text="Complete.")
 
         terminal_real = np.array(terminal_real)
         depletion_ages = np.array(depletion_ages)
+        lifetime_gift_real = np.array(lifetime_gift_real)
+        lifestyle_funded_ratio = np.array(lifestyle_funded_ratio)
+        years_below_target = np.array(years_below_target)
+        full_lifestyle_path = np.array(full_lifestyle_path)
+        first_cut_age = np.array(first_cut_age, dtype=float)
+        worst_drawdown = np.array(worst_drawdown)  # shape (n_runs, 2): [worst_1yr, worst_3yr]
+        worst_1yr_arr = worst_drawdown[:, 0]
+        worst_3yr_arr = worst_drawdown[:, 1]
         success_rate = 100.0 * success / n_runs
+
+        # Joint success: never deplete AND avg lifestyle >= 95% AND hit gift goal.
+        never_deplete = depletion_ages >= 100
+        hit_gift = lifetime_gift_real >= gift_goal
+        joint_success = never_deplete & full_lifestyle_path & hit_gift
+        joint_rate = 100.0 * np.mean(joint_success)
 
         st.markdown("---")
         c1, c2, c3, c4 = st.columns(4)
@@ -1427,6 +1509,114 @@ elif selection == "12. Monte Carlo Simulation":
         fig_hist = px.histogram(x=terminal_real/1e6, nbins=50, labels={'x': 'Terminal Real Wealth (Millions, 2026 $)'})
         fig_hist.update_layout(title="Distribution of Terminal Wealth at Age 100 (Real 2026 $)", yaxis_title="Number of Simulations", showlegend=False)
         st.plotly_chart(fig_hist, use_container_width=True)
+
+        # ----------------------------------------------------------------------
+        # JOINT SUCCESS: the headline "did I get everything" number
+        # ----------------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("Did You Get Everything You Planned For?")
+        st.markdown(
+            "A plan can avoid running out of money while still slashing your lifestyle for "
+            "years or gifting almost nothing. These metrics separate *surviving* from "
+            "*thriving*. **Joint success** = never depleted AND average lifestyle \u2265 95% of "
+            "target AND lifetime gift \u2265 your goal."
+        )
+        jc1, jc2, jc3, jc4 = st.columns(4)
+        jc1.metric("Never Ran Out of Money", f"{100.0*np.mean(never_deplete):.1f}%")
+        jc2.metric("Full Lifestyle (\u226595% of target)", f"{100.0*np.mean(full_lifestyle_path):.1f}%")
+        jc3.metric(f"Hit Gift Goal (\u2265${gift_goal/1e6:.1f}M)", f"{100.0*np.mean(hit_gift):.1f}%")
+        jc4.metric("JOINT Success (all three)", f"{joint_rate:.1f}%")
+
+        # Funnel showing attrition from survival -> full lifestyle -> + gift goal.
+        funnel_labels = ["Never Depleted", "+ Full Lifestyle", "+ Hit Gift Goal (Joint)"]
+        funnel_vals = [
+            100.0*np.mean(never_deplete),
+            100.0*np.mean(never_deplete & full_lifestyle_path),
+            joint_rate
+        ]
+        fig_funnel = go.Figure(go.Funnel(
+            y=funnel_labels, x=funnel_vals, textinfo="value+percent initial",
+            marker=dict(color=["#2ca02c", "#1f77b4", "#9467bd"])
+        ))
+        fig_funnel.update_layout(title="From Surviving to Thriving (% of paths)", height=300, margin=dict(l=10,r=10,t=40,b=10))
+        st.plotly_chart(fig_funnel, use_container_width=True)
+
+        # ----------------------------------------------------------------------
+        # LIFESTYLE QUALITY
+        # ----------------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("Lifestyle Quality")
+        lc1, lc2, lc3 = st.columns(3)
+        lc1.metric("Median Lifestyle Funded", f"{np.median(lifestyle_funded_ratio)*100:.1f}%",
+                   help="Total real lifestyle spending achieved vs. target, across retirement.")
+        lc2.metric("10th-Pctile Lifestyle Funded", f"{np.percentile(lifestyle_funded_ratio,10)*100:.1f}%",
+                   help="In a bad path (bottom 10%), this share of target lifestyle was funded.")
+        lc3.metric("Median Years With a Cut", f"{np.median(years_below_target):.0f}",
+                   help="Retirement years spent below target (guardrails active).")
+
+        fig_life = px.histogram(x=lifestyle_funded_ratio*100, nbins=40,
+                                labels={'x': 'Lifestyle Funded Ratio (% of target, real)'})
+        fig_life.add_vline(x=95, line_dash="dot", line_color="green", annotation_text="95% bar")
+        fig_life.update_layout(title="Distribution of Lifestyle Funded Ratio Across Paths",
+                               yaxis_title="Number of Simulations", showlegend=False, height=350)
+        st.plotly_chart(fig_life, use_container_width=True)
+
+        # Years-on-floor distribution.
+        fig_floor = px.histogram(x=years_below_target, nbins=int(max(years_below_target)+1) if len(years_below_target) and max(years_below_target)>0 else 10,
+                                 labels={'x': 'Number of Retirement Years Below Target Lifestyle'})
+        fig_floor.update_layout(title="How Many Years Get Pinched (Lifestyle Below Target)",
+                                yaxis_title="Number of Simulations", showlegend=False, height=350)
+        st.plotly_chart(fig_floor, use_container_width=True)
+
+        # ----------------------------------------------------------------------
+        # GIFTING DISTRIBUTION
+        # ----------------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("Generational Gifting Outcomes")
+        gc1, gc2, gc3, gc4 = st.columns(4)
+        gc1.metric("Gifting Success Rate", f"{100.0*np.mean(hit_gift):.1f}%",
+                   help=f"Share of paths with lifetime real gift \u2265 ${gift_goal/1e6:.1f}M goal.")
+        gc2.metric("Any Meaningful Gift (>$0)", f"{100.0*np.mean(lifetime_gift_real>1000):.1f}%")
+        gc3.metric("Median Lifetime Gift", f"${np.median(lifetime_gift_real)/1e6:,.2f}M")
+        gc4.metric("10th-Pctile Lifetime Gift", f"${np.percentile(lifetime_gift_real,10)/1e6:,.2f}M")
+
+        fig_gift = px.histogram(x=lifetime_gift_real/1e6, nbins=50,
+                                labels={'x': 'Total Lifetime Gift (Millions, real 2026 $)'})
+        fig_gift.add_vline(x=gift_goal/1e6, line_dash="dot", line_color="gold", annotation_text="Goal")
+        fig_gift.update_layout(title="Distribution of Total Lifetime Gifting (Real 2026 $)",
+                               yaxis_title="Number of Simulations", showlegend=False, height=350)
+        st.plotly_chart(fig_gift, use_container_width=True)
+        st.caption(
+            f"Median path gifts ${np.median(lifetime_gift_real)/1e6:,.2f}M in real terms, but the "
+            f"bottom 10% of paths gift only ${np.percentile(lifetime_gift_real,10)/1e6:,.2f}M or less. "
+            "Gifting is the first thing the guardrails sacrifice, so it varies more than lifestyle."
+        )
+
+        # ----------------------------------------------------------------------
+        # RISK TIMING
+        # ----------------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("Risk Timing")
+        valid_cuts = first_cut_age[~np.isnan(first_cut_age)]
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric("Median Worst 1-Year Real Return", f"{np.median(worst_1yr_arr)*100:.0f}%",
+                   help="The worst single-year real equity (USD sleeve) return drawn in the typical path.")
+        rc2.metric("Median Worst 3-Year Cumulative", f"{np.median(worst_3yr_arr)*100:.0f}%",
+                   help="Worst 3-year cumulative real equity return per path; captures sustained crashes / sequence risk.")
+        rc3.metric("Paths With a Lifestyle Cut", f"{100.0*np.mean(~np.isnan(first_cut_age)):.1f}%")
+
+        if len(valid_cuts) > 0:
+            fig_cut = px.histogram(x=valid_cuts, nbins=30,
+                                   labels={'x': 'Age of First Lifestyle Cut'})
+            fig_cut.update_layout(title="When the First Lifestyle Cut Happens (paths that get cut)",
+                                  yaxis_title="Number of Simulations", showlegend=False, height=350)
+            st.plotly_chart(fig_cut, use_container_width=True)
+            st.caption(
+                f"Among paths that suffer a cut, the median first cut lands at age {np.median(valid_cuts):.0f}. "
+                "Earlier cuts are more damaging because they compound over more remaining years."
+            )
+        else:
+            st.info("No lifestyle cuts occurred in any simulated path under these settings.")
 
         if use_bootstrap:
             st.caption(
