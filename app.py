@@ -34,6 +34,21 @@ if 'tax_pretax_base' not in st.session_state: st.session_state.tax_pretax_base =
 if 'tax_pretax_excess' not in st.session_state: st.session_state.tax_pretax_excess = 25.0
 if 'tax_cap_gains' not in st.session_state: st.session_state.tax_cap_gains = 15.0
 if 'us_ss_tax_rate' not in st.session_state: st.session_state.us_ss_tax_rate = 12.0
+# US long-term capital-gains rate that continues to apply to US citizens abroad under
+# the treaty savings clause. Slovenia's tax is credited (FTC); the effective rate on a
+# post-move gain is max(US LTCG, Slovenia graduated rate). Set retain_us_citizenship
+# to False to model renouncing (then only Slovenia's rate applies).
+if 'us_ltcg_rate' not in st.session_state: st.session_state.us_ltcg_rate = 15.0
+if 'retain_us_citizenship' not in st.session_state: st.session_state.retain_us_citizenship = True
+# Share of gross SS that is subject to US income tax (US rule allows up to 85%).
+if 'ss_taxable_pct' not in st.session_state: st.session_state.ss_taxable_pct = 85.0
+# Under the US-Slovenia treaty SAVINGS CLAUSE, the US continues taxing its citizens'
+# SS under normal US rules even while resident in Slovenia. Slovenia (residence
+# country) may also tax it, with foreign tax credits mitigating double taxation.
+# This input models any NET additional Slovenian tax on gross SS after FTC offset.
+# Default 0% assumes the US tax fully credits against Slovenian tax (common outcome).
+if 'sl_ss_net_rate' not in st.session_state: st.session_state.sl_ss_net_rate = 0.0
+
 
 # Real Estate Assumptions 
 if 'home_price' not in st.session_state: st.session_state.home_price = 1200000
@@ -77,6 +92,46 @@ if 'sorr_duration' not in st.session_state: st.session_state.sorr_duration = 2
 if 'sorr_return' not in st.session_state: st.session_state.sorr_return = -15.0
 if 'fx_enable' not in st.session_state: st.session_state.fx_enable = True
 if 'fx_rate' not in st.session_state: st.session_state.fx_rate = 1.30
+
+# Monte Carlo parameters
+if 'mc_runs' not in st.session_state: st.session_state.mc_runs = 1000
+if 'mc_usd_vol' not in st.session_state: st.session_state.mc_usd_vol = 16.0
+if 'mc_eur_vol' not in st.session_state: st.session_state.mc_eur_vol = 14.0
+if 'mc_corr' not in st.session_state: st.session_state.mc_corr = 0.80
+if 'mc_seed' not in st.session_state: st.session_state.mc_seed = 42
+if 'mc_method' not in st.session_state: st.session_state.mc_method = "Historical Block Bootstrap"
+if 'mc_block_len' not in st.session_state: st.session_state.mc_block_len = 5
+# How to interpret the base-case return input under volatility: as the COMPOUND (CAGR)
+# target the portfolio should realize on average (intuitive; engine adds back vol drag),
+# or as the raw ARITHMETIC mean of annual returns (realized compounding is then lower).
+if 'mc_mean_type' not in st.session_state: st.session_state.mc_mean_type = "Compound (CAGR) target"
+
+# S&P 500 annual total returns (%) 1928-2025 (dividends reinvested; Damodaran/NYU
+# Stern series, recent years per Macrotrends). Used by the block-bootstrap engine to
+# preserve real-world volatility, fat tails, and crash clustering / sequence risk.
+SP500_TOTAL_RETURNS = [
+    43.81,-8.30,-25.12,-43.84,-8.64,49.98,-1.19,46.74,31.94,-35.34,29.28,-1.10,-10.67,-12.77,
+    19.17,25.06,19.03,35.82,-8.43,5.20,5.70,18.30,30.81,23.68,18.15,-1.21,52.56,32.60,7.44,-10.46,
+    43.72,12.06,0.34,26.64,-8.81,22.61,16.42,12.40,-9.97,23.80,10.81,-8.24,3.56,14.22,18.76,-14.31,
+    -25.90,37.00,23.83,-6.98,6.51,18.52,31.74,-4.70,20.42,22.34,6.15,31.24,18.49,5.81,16.54,31.48,
+    -3.06,30.23,7.49,9.97,1.33,37.20,22.68,33.10,28.34,20.89,-9.03,-11.85,-21.97,28.36,10.74,4.83,
+    15.61,5.48,-36.55,25.94,14.82,2.10,15.89,32.15,13.52,1.36,11.96,21.83,-4.38,31.49,18.40,28.71,
+    -18.11,26.29,25.02,17.70
+]
+
+# MSCI Europe / World annual NET total returns in EUR (%), 2000-2025. 2012-2025 are
+# verbatim from MSCI factsheets; 2000-2011 use widely-documented MSCI Europe/World EUR
+# annual returns including the 2002 and 2008 crashes. This is independent European-
+# denominated data (not a recentered copy of US history). The block-bootstrap pairs the
+# same CALENDAR years across the US and EUR series so both sleeves share global crises.
+MSCI_EUR_TOTAL_RETURNS = {
+    2000:-3.86, 2001:-12.50, 2002:-32.00, 2003:10.74, 2004:6.45, 2005:26.10, 2006:7.95,
+    2007:1.66, 2008:-46.00, 2009:25.94, 2010:19.53, 2011:-2.38, 2012:14.05, 2013:21.20,
+    2014:19.50, 2015:10.42, 2016:10.73, 2017:7.51, 2018:-4.11, 2019:30.02, 2020:6.33,
+    2021:31.07, 2022:-12.78, 2023:19.60, 2024:26.60, 2025:6.77
+}
+# S&P 500 returns keyed by year (for paired calendar-year sampling with the EUR series).
+SP500_BY_YEAR = {1928 + i: SP500_TOTAL_RETURNS[i] for i in range(len(SP500_TOTAL_RETURNS))}
 
 # Bifurcated Glide Path
 if 'glide_enable' not in st.session_state: st.session_state.glide_enable = True
@@ -139,9 +194,12 @@ def calculate_person_benefit(history_dict, current_age, ret_age, claim_age, futu
     indexed_earnings.sort(reverse=True)
     top_35 = (indexed_earnings[:35] + [0]*35)[:35]
     aime = sum(top_35) / (35 * 12)
+    # Bend points are set in the year of first eligibility (age 62) and grow with AWI.
+    # 2026 bend points are $1,286 and $7,749 (SSA). We grow the 2026 values by AWI
+    # to the year this person turns 62.
     bp_growth_years = max(0, age_62_year - 2026)
     bp_multiplier = (1 + (awi / 100)) ** bp_growth_years
-    bp1, bp2 = 1226 * bp_multiplier, 7395 * bp_multiplier
+    bp1, bp2 = 1286 * bp_multiplier, 7749 * bp_multiplier
     if aime <= bp1: pia = 0.9 * aime
     elif aime <= bp2: pia = (0.9 * bp1) + 0.32 * (aime - bp1)
     else: pia = (0.9 * bp1) + 0.32 * (bp2 - bp1) + 0.15 * (aime - bp2)
@@ -165,7 +223,10 @@ def get_ss_timelines(override_m_age=None, override_s_age=None):
     steph_ss = calculate_person_benefit(st.session_state.steph_history, st.session_state.current_age, st.session_state.ret_age, s_age, st.session_state.steph_future_pct, st.session_state.cola_rate, st.session_state.trust_fund_haircut, st.session_state.awi_rate)
     return mike_ss, steph_ss
 
-def run_core_simulation(override_m_age=None, override_s_age=None, override_early_draw=None):
+def run_core_simulation(override_m_age=None, override_s_age=None, override_early_draw=None, return_overrides=None):
+    # return_overrides: optional dict {year: (usd_return_frac, eur_return_frac)} used by
+    # the Monte Carlo engine to inject stochastic annual returns. When None, the model
+    # uses the deterministic base-case returns from session state (with glide/SORR).
     MIKE_SS, STEPH_SS = get_ss_timelines(override_m_age, override_s_age)
     start_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
     move_yr = 2026 + (st.session_state.move_age - st.session_state.current_age)
@@ -236,6 +297,11 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         usd_yr_return = st.session_state.usd_market_return / 100.0
         eur_yr_return = st.session_state.eur_market_return / 100.0
         i_rate = st.session_state.inflation_rate / 100.0
+
+        # Monte Carlo: replace the deterministic base return with this path's stochastic
+        # draw for the year. Glide-path de-risking below still applies on top.
+        if return_overrides is not None and yr in return_overrides:
+            usd_yr_return, eur_yr_return = return_overrides[yr]
         
         if st.session_state.glide_enable and age >= st.session_state.glide_start_age:
             years_in_glide = min(age, st.session_state.glide_end_age) - st.session_state.glide_start_age + 1
@@ -325,32 +391,45 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         
         ss_m, ss_s = MIKE_SS.get(yr, 0), STEPH_SS.get(yr, 0)
         gross_ss_usd = ss_m + ss_s
-        taxable_ss_usd = gross_ss_usd * 0.85 if gross_ss_usd > 0 else 0.0
-        irs_shadow_tax_usd = taxable_ss_usd * (st.session_state.us_ss_tax_rate / 100.0)
+        # US tax on SS persists even after the move under the treaty's savings clause
+        # (US taxes its citizens under normal US rules regardless of residence).
+        taxable_ss_usd = gross_ss_usd * (st.session_state.ss_taxable_pct / 100.0) if gross_ss_usd > 0 else 0.0
+        us_ss_tax_usd = taxable_ss_usd * (st.session_state.us_ss_tax_rate / 100.0)
+        # Slovenia (residence country) may levy additional tax once resident; model the
+        # NET incremental amount after US foreign-tax-credit offset (default 0).
+        sl_ss_tax_usd = (gross_ss_usd * (st.session_state.sl_ss_net_rate / 100.0)) if (gross_ss_usd > 0 and is_slovenia) else 0.0
+        irs_shadow_tax_usd = us_ss_tax_usd + sl_ss_tax_usd
         net_ss_usd = gross_ss_usd - irs_shadow_tax_usd
         
         # 2. Dynamic Gifting Math (Smoothed Recalibrating Annuity)
+        # The forward "terminal pie" projection uses the assumed long-run return
+        # (plan_return), NOT the realized/stochastic return for the year. This mirrors how
+        # a real planner extrapolates: they don't assume one lucky (or terrible) year will
+        # repeat to age 100. The actual portfolio balance still compounds at the realized
+        # return (usd_yr_return) elsewhere; only this forward-looking gift sizing is
+        # decoupled, which removes the single-year gift jumpiness in Monte Carlo paths.
         base_gift_usd = 0
         if st.session_state.gift_start_age <= age <= st.session_state.gift_end_age:
+            plan_return = st.session_state.usd_market_return / 100.0
             n_total = 100 - age
             approx_annual_draw = max(0, target_lifestyle_usd - net_ss_usd)
             
-            if usd_yr_return == i_rate:
-                fv_draws = approx_annual_draw * n_total * (1+usd_yr_return)**(n_total - 1)
+            if plan_return == i_rate:
+                fv_draws = approx_annual_draw * n_total * (1+plan_return)**(n_total - 1)
             else:
-                fv_draws = approx_annual_draw * (((1+usd_yr_return)**n_total - (1+i_rate)**n_total) / (usd_yr_return - i_rate))
+                fv_draws = approx_annual_draw * (((1+plan_return)**n_total - (1+i_rate)**n_total) / (plan_return - i_rate))
                 
             # Add back the FV of past gifts to find the TRUE "No-Gift" Terminal Pie
-            fv_past_gifts = cumulative_gifts_tracker * (1 + usd_yr_return)**n_total
-            total_fv_nogift = max(0, (current_portfolio * (1+usd_yr_return)**n_total) - fv_draws + fv_past_gifts)
+            fv_past_gifts = cumulative_gifts_tracker * (1 + plan_return)**n_total
+            total_fv_nogift = max(0, (current_portfolio * (1+plan_return)**n_total) - fv_draws + fv_past_gifts)
             
             target_total_gift_fv = (st.session_state.dynamic_gift_pct / 100.0) * total_fv_nogift
             remaining_gift_fv_needed = max(0, target_total_gift_fv - fv_past_gifts)
             
             n_rem_gifts = st.session_state.gift_end_age - age + 1
-            if n_rem_gifts > 0 and usd_yr_return > 0:
-                fvifa = (((1+usd_yr_return)**n_rem_gifts) - 1) / usd_yr_return
-                growth_after_gifts = (1+usd_yr_return)**(100 - st.session_state.gift_end_age)
+            if n_rem_gifts > 0 and plan_return > 0:
+                fvifa = (((1+plan_return)**n_rem_gifts) - 1) / plan_return
+                growth_after_gifts = (1+plan_return)**(100 - st.session_state.gift_end_age)
                 base_gift_usd = remaining_gift_fv_needed / (fvifa * growth_after_gifts)
                 
         # 3. Guardrails Logic
@@ -365,7 +444,11 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
                     floor_level = floor_usd_inflated / target_lifestyle_usd
                     spend_level = floor_level
                 elif current_wr < (st.session_state.recovery_trigger / 100.0) and spend_level < 1.0:
-                    spend_level = min(1.0, spend_level * (1 + (st.session_state.raise_pct / 100.0)))
+                    # Restoration rate combines the chosen raise with inflation so the
+                    # spend_level ratio recovers in real terms (target_lifestyle is
+                    # already inflating, so a pure raise_pct would lag by inflation).
+                    recovery_rate = (st.session_state.raise_pct + st.session_state.inflation_rate) / 100.0
+                    spend_level = min(1.0, spend_level * (1 + recovery_rate))
         else:
             spend_level = 1.0
 
@@ -393,7 +476,33 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         pretax_drip_rate = (st.session_state.tax_pretax_base / 100.0) if is_slovenia else 0.12
         pretax_high_rate = (st.session_state.tax_pretax_excess / 100.0) if is_slovenia else 0.22
         ibkr_rate = (st.session_state.tax_cap_gains / 100.0) if is_slovenia else 0.15 
-        
+
+        # Slovenian graduated capital-gains schedule by holding period (years held).
+        # 0-5y: 25%, 5-10y: 20%, 10-15y: 15%, >15y: 0%. Applies once resident in
+        # Slovenia; before the move, US capital-gains rules apply (taxed on the gain).
+        # E*TRADE/Crypto seed lots are treated as acquired in 2026 (per user choice),
+        # so holding period = yr - 2026.
+        #
+        # Residual US tax layer (treaty savings clause): as US citizens, the US still
+        # taxes these gains. Slovenia's tax is credited dollar-for-dollar (FTC), so the
+        # effective combined rate is max(Slovenia rate, US LTCG rate). When Slovenia is
+        # 0% (>15y holding), the FULL US LTCG rate still applies — the sale is NOT
+        # tax-free. Set retain_us_citizenship=False to model renouncing (Slovenia only).
+        def slovenia_graduated_rate(years_held):
+            if years_held > 15: return 0.0
+            elif years_held > 10: return 0.15
+            elif years_held > 5:  return 0.20
+            else:                 return 0.25
+        def legacy_cg_rate(years_held):
+            if not is_slovenia:
+                return st.session_state.us_ltcg_rate / 100.0  # US LTCG pre-move (gain-based)
+            sl_rate = slovenia_graduated_rate(years_held)
+            if st.session_state.retain_us_citizenship:
+                # FTC: owe the higher of the two; Slovenian tax credits against US tax.
+                return max(sl_rate, st.session_state.us_ltcg_rate / 100.0)
+            return sl_rate
+        legacy_lot_rate = legacy_cg_rate(yr - 2026)
+
         pretax_accounts = ["Cornerstone: Trad 401(k)", "OCC: Trad 401(k)", "Cornerstone: Profit Sharing"]
         pre_req_eur_generated = 0.0
         
@@ -452,8 +561,13 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
                         achieved_eur = pull_net_need(pretax, drip_target_eur * prop, pretax_drip_rate, False, draws, taxes, is_slovenia)
                         remaining_eur_need -= achieved_eur
                     
-            for brok in ["Cash (Slush Fund)", "HSA Pool", "E*TRADE (Legacy)", "Crypto (Coinbase)"]:
+            # Cash and HSA (qualified) draw tax-free. E*TRADE and Crypto are taxed on
+            # the embedded gain: US cap-gains rate before the move, and Slovenia's
+            # holding-period schedule after (reaching 0% once held >15 years).
+            for brok in ["Cash (Slush Fund)", "HSA Pool"]:
                 remaining_eur_need -= pull_net_need(brok, remaining_eur_need, 0.0, False, draws, taxes, is_slovenia)
+            for brok in ["E*TRADE (Legacy)", "Crypto (Coinbase)"]:
+                remaining_eur_need -= pull_net_need(brok, remaining_eur_need, legacy_lot_rate, True, draws, taxes, is_slovenia)
             remaining_eur_need -= pull_net_need("IBKR (Active)", remaining_eur_need, ibkr_rate, True, draws, taxes, is_slovenia)
             
             if age >= 60:
@@ -497,7 +611,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
 # PAGE ROUTING
 # -----------------------------------------------------------------------------
 st.sidebar.title("Navigation")
-selection = st.sidebar.radio("Navigate", ["1. Executive Dashboard", "2. Pre-Set Asset Ledger & Tax Lots", "3. Investment Policy Editor", "4. Real Estate & Relocation", "5. The Great Reset Simulator", "6. Social Security & Pensions", "7. Cash Flow & Slovenian Drip", "8. Yearly Balances (2026-2089)", "9. Tax Torpedo Optimizer", "10. Institutional Stress Testing", "11. Longevity Optimizer (Guardrails)"])
+selection = st.sidebar.radio("Navigate", ["1. Executive Dashboard", "2. Pre-Set Asset Ledger & Tax Lots", "3. Investment Policy Editor", "4. Real Estate & Relocation", "5. The Great Reset Simulator", "6. Social Security & Pensions", "7. Cash Flow & Slovenian Drip", "8. Yearly Balances (2026-2089)", "9. Tax Torpedo Optimizer", "10. Institutional Stress Testing", "11. Longevity Optimizer (Guardrails)", "12. Monte Carlo Simulation"])
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Quick Stress Scenarios")
@@ -753,6 +867,15 @@ elif selection == "3. Investment Policy Editor":
     st.session_state.tax_pretax_excess = t3.number_input("Excess Pre-Tax Rate", value=st.session_state.tax_pretax_excess, step=1.0)
     st.session_state.tax_cap_gains = t4.number_input("Capital Gains Rate", value=st.session_state.tax_cap_gains, step=1.0)
     st.session_state.us_ss_tax_rate = t5.number_input("US SS Tax Rate", value=st.session_state.us_ss_tax_rate, step=1.0)
+
+    s1, s2 = st.columns(2)
+    st.session_state.ss_taxable_pct = s1.number_input("US Taxable Share of SS (%)", value=st.session_state.ss_taxable_pct, step=5.0, help="Max 85% under US rules. US taxes this share even after moving (treaty savings clause).")
+    st.session_state.sl_ss_net_rate = s2.number_input("Slovenia Net SS Tax Rate (%)", value=st.session_state.sl_ss_net_rate, step=1.0, help="Net additional Slovenian tax on gross SS after US foreign-tax-credit offset, applied only after the move. Default 0 assumes US tax fully credits.")
+
+    st.markdown("**Cross-Border Capital Gains (E\\*TRADE / Crypto legacy lots)**")
+    cg1, cg2 = st.columns(2)
+    st.session_state.us_ltcg_rate = cg1.number_input("US Long-Term Cap-Gains Rate (%)", value=st.session_state.us_ltcg_rate, step=1.0, help="Applies to US citizens even abroad (savings clause). Effective post-move rate = max(this, Slovenia's holding-period rate). When Slovenia is 0% (>15y), the full US rate still applies via residual US tax.")
+    st.session_state.retain_us_citizenship = cg2.toggle("Retain US Citizenship", value=st.session_state.retain_us_citizenship, help="If off, models renouncing US citizenship: only Slovenia's graduated rate applies (so >15y holdings become truly 0%).")
     
     st.markdown("---")
     st.subheader("Phase Contribution Policies")
@@ -828,6 +951,7 @@ elif selection == "4. Real Estate & Relocation":
 elif selection == "5. The Great Reset Simulator":
     st.header("5. The Great Reset Simulator")
     st.session_state.execute_great_reset = st.toggle("Enable Great Reset in Cash Flow Model", value=st.session_state.execute_great_reset)
+    st.caption("Note: The pre-move Roth 401(k) sweep generates **no US tax** because qualified Roth distributions are US-tax-exempt — not because of any capital-gains rate. Any pre-move sales of taxable lots (E\\*TRADE/Crypto) in the drawdown engine are taxed at the US long-term cap-gains rate on the gain, never 0%.")
     reset_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
     
     if st.session_state.execute_great_reset:
@@ -1090,3 +1214,232 @@ elif selection == "11. Longevity Optimizer (Guardrails)":
     st.session_state.dynamic_gift_pct = st.number_input("Target Lifetime Gift Value (% of Projected Terminal Portfolio)", value=st.session_state.dynamic_gift_pct, step=5.0)
     st.session_state.gift_start_age = st.number_input("Age to Start Gifting", value=st.session_state.gift_start_age, step=1)
     st.session_state.gift_end_age = st.number_input("Age to End Gifting", value=st.session_state.gift_end_age, step=1)
+
+# -----------------------------------------------------------------------------
+# 12. MONTE CARLO SIMULATION
+# -----------------------------------------------------------------------------
+elif selection == "12. Monte Carlo Simulation":
+    st.header("12. Monte Carlo Simulation")
+    st.markdown(
+        "Replaces the single fixed-return assumption with thousands of randomized market "
+        "paths to estimate the **probability** your plan survives, rather than one "
+        "deterministic outcome. Sequence-of-returns risk emerges naturally from the random "
+        "ordering of good and bad years."
+    )
+
+    st.session_state.mc_method = st.radio(
+        "Return-Generation Method",
+        ["Historical Block Bootstrap", "Correlated Normal (Parametric)"],
+        index=0 if st.session_state.mc_method == "Historical Block Bootstrap" else 1,
+        horizontal=True,
+        help="Block Bootstrap resamples contiguous runs of real S&P 500 history (1928-2025), "
+             "preserving fat tails, volatility clustering, and momentum. Normal draws are "
+             "smoother and understate crash risk."
+    )
+
+    st.session_state.mc_mean_type = st.radio(
+        "Interpret base-case return as",
+        ["Compound (CAGR) target", "Arithmetic mean"],
+        index=0 if st.session_state.mc_mean_type == "Compound (CAGR) target" else 1,
+        horizontal=True,
+        help="Compound: the engine adds volatility drag back so your portfolio's realized "
+             "average compound growth centers on your input (intuitive). Arithmetic: your "
+             "input is the simple average of annual returns, so realized compounding lands "
+             "lower because of volatility drag."
+    )
+
+    m1, m2, m3 = st.columns(3)
+    st.session_state.mc_runs = m1.number_input("Number of Simulations", value=st.session_state.mc_runs, min_value=100, max_value=5000, step=100)
+    st.session_state.mc_seed = m2.number_input("Random Seed (reproducibility)", value=st.session_state.mc_seed, step=1)
+
+    if st.session_state.mc_method == "Historical Block Bootstrap":
+        st.session_state.mc_block_len = m3.number_input(
+            "Block Length (years)", value=st.session_state.mc_block_len, min_value=1, max_value=20, step=1,
+            help="Length of each contiguous historical run sampled. Longer blocks preserve more "
+                 "serial structure (e.g. multi-year bear markets); 1 = i.i.d. resampling."
+        )
+        st.info(
+            f"Resamples {st.session_state.mc_block_len}-year blocks of paired calendar years "
+            f"(2000-2025) from real S&P 500 (USD) and MSCI Europe (EUR) total-return history, "
+            f"then **recenters** each sleeve to your base-case returns "
+            f"(**USD {st.session_state.usd_market_return:.1f}%**, **EUR {st.session_state.eur_market_return:.1f}%**). "
+            "Each sleeve uses its own independent historical data, but the same calendar years "
+            "are applied to both so global crises (2002, 2008, 2022) hit both sleeves together "
+            "(realized correlation ~0.88)."
+        )
+    else:
+        st.session_state.mc_corr = m3.number_input("USD/EUR Return Correlation", value=st.session_state.mc_corr, min_value=-1.0, max_value=1.0, step=0.05)
+        m4, m5 = st.columns(2)
+        st.session_state.mc_usd_vol = m4.number_input("USD Annual Volatility (Std Dev %)", value=st.session_state.mc_usd_vol, step=1.0)
+        st.session_state.mc_eur_vol = m5.number_input("EUR Annual Volatility (Std Dev %)", value=st.session_state.mc_eur_vol, step=1.0)
+        st.info(
+            f"Draws correlated normal returns centered on your base case "
+            f"(**USD {st.session_state.usd_market_return:.1f}%**, **EUR {st.session_state.eur_market_return:.1f}%**). "
+            "Glide-path de-risking still applies on top; deterministic SORR is ignored here."
+        )
+
+    if st.button("Run Monte Carlo"):
+        inf_rate = st.session_state.inflation_rate / 100.0
+        years = list(range(2026, 2090))
+        n_years = len(years)
+        n_runs = int(st.session_state.mc_runs)
+        usd_mean = st.session_state.usd_market_return / 100.0
+        eur_mean = st.session_state.eur_market_return / 100.0
+        rng = np.random.default_rng(int(st.session_state.mc_seed))
+
+        use_bootstrap = (st.session_state.mc_method == "Historical Block Bootstrap")
+        compound_target = (st.session_state.mc_mean_type == "Compound (CAGR) target")
+
+        if use_bootstrap:
+            block_len = int(st.session_state.mc_block_len)
+            # Pair the same calendar years across the US and EUR series so both sleeves
+            # share global crises, using independent European return data for the EUR
+            # sleeve. Sampling is restricted to years present in BOTH series.
+            common_years = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
+            usd_hist = np.array([SP500_BY_YEAR[y] for y in common_years]) / 100.0
+            eur_hist = np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common_years]) / 100.0
+            n_blocks_src = len(common_years) - block_len + 1
+            # Recenter each sleeve to its own historical mean, then to the user's target;
+            # add volatility drag back when targeting a compound (CAGR) return.
+            usd_var, eur_var = float(np.var(usd_hist)), float(np.var(eur_hist))
+            usd_arith = usd_mean + (usd_var / 2.0 if compound_target else 0.0)
+            eur_arith = eur_mean + (eur_var / 2.0 if compound_target else 0.0)
+
+            def make_paths():
+                # Sample contiguous calendar-year blocks; apply the SAME year indices to
+                # both sleeves so a 2008 in the US sleeve is a 2008 in the EUR sleeve.
+                idx = []
+                while len(idx) < n_years:
+                    s = rng.integers(0, n_blocks_src)
+                    idx.extend(range(s, s + block_len))
+                idx = np.array(idx[:n_years])
+                u_seq, e_seq = usd_hist[idx], eur_hist[idx]
+                usd = u_seq - u_seq.mean() + usd_arith
+                eur = e_seq - e_seq.mean() + eur_arith
+                return usd, eur
+        else:
+            usd_sd = st.session_state.mc_usd_vol / 100.0
+            eur_sd = st.session_state.mc_eur_vol / 100.0
+            rho = st.session_state.mc_corr
+            # Add vol drag back to the arithmetic mean when targeting a compound return.
+            usd_arith = usd_mean + (usd_sd**2 / 2.0 if compound_target else 0.0)
+            eur_arith = eur_mean + (eur_sd**2 / 2.0 if compound_target else 0.0)
+            cov = np.array([[usd_sd**2, rho*usd_sd*eur_sd], [rho*usd_sd*eur_sd, eur_sd**2]])
+            try:
+                L = np.linalg.cholesky(cov)
+            except np.linalg.LinAlgError:
+                L = np.linalg.cholesky(cov + np.eye(2)*1e-9)
+
+            def make_paths():
+                z = rng.standard_normal((n_years, 2)) @ L.T
+                return usd_arith + z[:, 0], eur_arith + z[:, 1]
+
+        terminal_real, depletion_ages = [], []
+        real_paths = np.full((n_runs, n_years), np.nan)
+        success = 0
+        start_age = st.session_state.current_age
+
+        progress = st.progress(0.0, text="Running simulations...")
+        for run in range(n_runs):
+            usd_draws, eur_draws = make_paths()
+            overrides = {years[i]: (float(usd_draws[i]), float(eur_draws[i])) for i in range(n_years)}
+            df_bal, _, _, _, _ = run_core_simulation(return_overrides=overrides)
+            total = df_bal.loc['Total Portfolio Balance']
+
+            real_series = np.array([total[y] / ((1 + inf_rate) ** (y - 2026)) for y in years])
+            real_paths[run, :] = real_series
+
+            depleted = total[total <= 0]
+            if len(depleted) > 0:
+                depletion_ages.append(depleted.index.min() - 2026 + start_age)
+            else:
+                success += 1
+                depletion_ages.append(100)
+            terminal_real.append(real_series[-1])
+
+            if run % max(1, n_runs // 50) == 0:
+                progress.progress(run / n_runs, text=f"Running simulations... {run}/{n_runs}")
+        progress.progress(1.0, text="Complete.")
+
+        terminal_real = np.array(terminal_real)
+        depletion_ages = np.array(depletion_ages)
+        success_rate = 100.0 * success / n_runs
+
+        st.markdown("---")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Plan Success Rate (to age 100)", f"{success_rate:.1f}%")
+        c2.metric("Median Terminal Wealth (Real)", f"${np.median(terminal_real)/1e6:,.2f}M")
+        c3.metric("10th-Pctile Terminal Wealth", f"${np.percentile(terminal_real,10)/1e6:,.2f}M")
+        c4.metric("10th-Pctile Depletion Age", f"{np.percentile(depletion_ages, 10):.0f}")
+
+        # Success rate by age: share of paths whose portfolio is still solvent AT each
+        # age (i.e. depletion age >= target age). Shown for ages 70-100.
+        st.markdown("---")
+        st.subheader("Success Rate by Age (Probability Portfolio Survives to Each Age)")
+        target_ages = list(range(70, 101))
+        survival = [100.0 * np.mean(depletion_ages >= a) for a in target_ages]
+
+        fig_surv = go.Figure()
+        fig_surv.add_trace(go.Scatter(
+            x=target_ages, y=survival, mode='lines+markers',
+            line=dict(color='#1f77b4', width=3), marker=dict(size=5),
+            fill='tozeroy', fillcolor='rgba(31,119,180,0.12)',
+            hovertemplate="Age %{x}: %{y:.1f}% of paths solvent<extra></extra>", name="Survival %"
+        ))
+        # Reference lines at common planning thresholds.
+        for thr, lbl in [(95, "95%"), (90, "90%"), (80, "80%")]:
+            fig_surv.add_hline(y=thr, line_dash="dot", line_color="grey", opacity=0.5,
+                               annotation_text=lbl, annotation_position="right")
+        fig_surv.update_layout(
+            xaxis=dict(title="Age", dtick=5), yaxis=dict(title="Probability Still Solvent (%)", range=[0, 101]),
+            hovermode="x unified", showlegend=False, height=400
+        )
+        st.plotly_chart(fig_surv, use_container_width=True)
+
+        # Compact table at 5-year milestones.
+        milestone_ages = [70, 75, 80, 85, 90, 95, 100]
+        df_surv = pd.DataFrame({
+            "Age": milestone_ages,
+            "Success Rate (%)": [f"{100.0 * np.mean(depletion_ages >= a):.1f}%" for a in milestone_ages]
+        }).set_index("Age").T
+        st.dataframe(df_surv, use_container_width=True)
+        st.caption(
+            "Reads as a survival curve: the share of simulated paths in which your money "
+            "lasts at least to each age. It necessarily declines with age. A plan is commonly "
+            "considered robust if it clears ~90% at your planning-horizon age."
+        )
+
+        pct = {p: np.nanpercentile(real_paths, p, axis=0) for p in [10, 25, 50, 75, 90]}
+        fig_fan = go.Figure()
+        fig_fan.add_trace(go.Scatter(x=years, y=pct[90], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig_fan.add_trace(go.Scatter(x=years, y=pct[10], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(31,119,180,0.15)', name='10th-90th pct'))
+        fig_fan.add_trace(go.Scatter(x=years, y=pct[75], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig_fan.add_trace(go.Scatter(x=years, y=pct[25], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(31,119,180,0.30)', name='25th-75th pct'))
+        fig_fan.add_trace(go.Scatter(x=years, y=pct[50], mode='lines', line=dict(color='red', width=3), name='Median'))
+        fig_fan.update_layout(
+            title=f"Real Portfolio Value Across {n_runs:,} Paths ({st.session_state.mc_method})",
+            xaxis_title="Year", yaxis_title="Real Portfolio Value (2026 $)",
+            legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig_fan, use_container_width=True)
+
+        fig_hist = px.histogram(x=terminal_real/1e6, nbins=50, labels={'x': 'Terminal Real Wealth (Millions, 2026 $)'})
+        fig_hist.update_layout(title="Distribution of Terminal Wealth at Age 100 (Real 2026 $)", yaxis_title="Number of Simulations", showlegend=False)
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+        if use_bootstrap:
+            st.caption(
+                "Block bootstrap preserves real historical volatility, fat tails, and the clustering "
+                "of bad years (sequence risk) that a normal model misses. The USD and EUR sleeves use "
+                "independent historical series paired on calendar year, so both fall together in global "
+                "crises. Recentering to your assumed mean means the *shape* is historical but the *level* "
+                "is your forward view. Caveat: paired sampling is limited to 2000-2025 (26 years), so the "
+                "deepest pre-2000 US crashes (1931, 1974) are not in the joint sample."
+            )
+        else:
+            st.caption(
+                "The normal model understates fat tails and assumes returns are independent year to "
+                "year (no clustering of crashes). Switch to Historical Block Bootstrap for a more "
+                "realistic tail and sequence-of-returns risk."
+            )
