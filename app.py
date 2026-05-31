@@ -107,6 +107,22 @@ if 'mc_block_len' not in st.session_state: st.session_state.mc_block_len = 5
 if 'mc_mean_type' not in st.session_state: st.session_state.mc_mean_type = "Compound (CAGR) target"
 # Explicit lifetime gifting goal (real 2026 $) to measure "gift success" against in MC.
 if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 1500000
+# Multi-factor stress toggles and parameters for the Monte Carlo.
+if 'mc_stoch_inflation' not in st.session_state: st.session_state.mc_stoch_inflation = True
+if 'mc_infl_vol' not in st.session_state: st.session_state.mc_infl_vol = 1.5
+if 'mc_infl_equity_corr' not in st.session_state: st.session_state.mc_infl_equity_corr = -0.35
+if 'mc_stoch_fx' not in st.session_state: st.session_state.mc_stoch_fx = True
+if 'mc_fx_vol' not in st.session_state: st.session_state.mc_fx_vol = 9.0
+if 'mc_stoch_longevity' not in st.session_state: st.session_state.mc_stoch_longevity = True
+if 'mc_wife_age_offset' not in st.session_state: st.session_state.mc_wife_age_offset = 2
+if 'mc_ltc_enable' not in st.session_state: st.session_state.mc_ltc_enable = True
+if 'mc_ltc_prob' not in st.session_state: st.session_state.mc_ltc_prob = 0.20
+if 'mc_ltc_cost' not in st.session_state: st.session_state.mc_ltc_cost = 75000
+if 'mc_ltc_years' not in st.session_state: st.session_state.mc_ltc_years = 3
+if 'mc_tax_regime' not in st.session_state: st.session_state.mc_tax_regime = True
+if 'mc_tax_vol' not in st.session_state: st.session_state.mc_tax_vol = 0.15
+if 'mc_ss_haircut_prob' not in st.session_state: st.session_state.mc_ss_haircut_prob = 0.50
+if 'mc_ss_haircut_size' not in st.session_state: st.session_state.mc_ss_haircut_size = 0.20
 
 # S&P 500 annual total returns (%) 1928-2025 (dividends reinvested; Damodaran/NYU
 # Stern series, recent years per Macrotrends). Used by the block-bootstrap engine to
@@ -134,6 +150,33 @@ MSCI_EUR_TOTAL_RETURNS = {
 }
 # S&P 500 returns keyed by year (for paired calendar-year sampling with the EUR series).
 SP500_BY_YEAR = {1928 + i: SP500_TOTAL_RETURNS[i] for i in range(len(SP500_TOTAL_RETURNS))}
+
+# SSA 2025 period life-table life expectancy e(x) by exact age, male & female (55-114),
+# used to simulate stochastic death ages via the exact curtate relation
+# p(x) = (e(x)-0.5)/(1+(e(x+1)-0.5)), which reproduces the SSA table exactly.
+SSA_EX_MALE = {55:24.94,56:24.15,57:23.37,58:22.59,59:21.83,60:21.08,61:20.34,62:19.61,63:18.89,64:18.18,65:17.48,66:16.79,67:16.11,68:15.43,69:14.76,70:14.09,71:13.44,72:12.80,73:12.16,74:11.53,75:10.92,76:10.32,77:9.74,78:9.18,79:8.64,80:8.11,81:7.60,82:7.11,83:6.64,84:6.18,85:5.74,86:5.32,87:4.92,88:4.54,89:4.21,90:3.91,91:3.60,92:3.32,93:3.06,94:2.83,95:2.63,96:2.44,97:2.28,98:2.13,99:2.00,100:1.88,101:1.76,102:1.66,103:1.56,104:1.47,105:1.39,106:1.31,107:1.23,108:1.15,109:1.08,110:1.01,111:0.94,112:0.87,113:0.81,114:0.75}
+SSA_EX_FEMALE = {55:28.34,56:27.48,57:26.63,58:25.78,59:24.95,60:24.12,61:23.31,62:22.50,63:21.70,64:20.90,65:20.12,66:19.34,67:18.56,68:17.79,69:17.03,70:16.27,71:15.53,72:14.80,73:14.08,74:13.37,75:12.68,76:12.00,77:11.35,78:10.71,79:10.09,80:9.49,81:8.90,82:8.34,83:7.79,84:7.26,85:6.75,86:6.27,87:5.81,88:5.38,89:4.99,90:4.62,91:4.27,92:3.94,93:3.64,94:3.36,95:3.10,96:2.87,97:2.66,98:2.47,99:2.30,100:2.14,101:2.00,102:1.87,103:1.75,104:1.63,105:1.52,106:1.42,107:1.32,108:1.23,109:1.14,110:1.05,111:0.97,112:0.89,113:0.82,114:0.75}
+
+def _survival_probs(ex_table):
+    ages = sorted(ex_table); E = {x: ex_table[x] - 0.5 for x in ages}; p = {}
+    for x in ages:
+        p[x] = min(0.9999, max(0.0, E[x] / (1 + E[x+1]))) if (x+1) in E else 0.0
+    return p
+
+SURV_MALE = _survival_probs(SSA_EX_MALE)
+SURV_FEMALE = _survival_probs(SSA_EX_FEMALE)
+_MIN_LIFE_AGE = min(SURV_MALE)
+
+def sample_death_age(current_age, sex_table, rng):
+    """Draw a death age from SSA survival probabilities. Pre-55 ages assumed to survive."""
+    max_age = max(sex_table); age = current_age
+    while age < max_age:
+        pr = sex_table.get(age, 1.0 if age < _MIN_LIFE_AGE else 0.0)
+        if rng.random() > pr:
+            break
+        age += 1
+    return age
+
 
 # Bifurcated Glide Path
 if 'glide_enable' not in st.session_state: st.session_state.glide_enable = True
@@ -225,10 +268,28 @@ def get_ss_timelines(override_m_age=None, override_s_age=None):
     steph_ss = calculate_person_benefit(st.session_state.steph_history, st.session_state.current_age, st.session_state.ret_age, s_age, st.session_state.steph_future_pct, st.session_state.cola_rate, st.session_state.trust_fund_haircut, st.session_state.awi_rate)
     return mike_ss, steph_ss
 
-def run_core_simulation(override_m_age=None, override_s_age=None, override_early_draw=None, return_overrides=None):
-    # return_overrides: optional dict {year: (usd_return_frac, eur_return_frac)} used by
-    # the Monte Carlo engine to inject stochastic annual returns. When None, the model
-    # uses the deterministic base-case returns from session state (with glide/SORR).
+def run_core_simulation(override_m_age=None, override_s_age=None, override_early_draw=None, return_overrides=None, scenario=None):
+    # return_overrides: optional dict {year: (usd_return_frac, eur_return_frac)} for the
+    # original returns-only Monte Carlo. When None, deterministic base-case returns apply.
+    #
+    # scenario: optional dict for the multi-factor Monte Carlo, with any of these keys:
+    #   'returns'   : {year: (usd_frac, eur_frac)}      stochastic equity returns
+    #   'inflation' : {year: inflation_frac}            stochastic per-year inflation
+    #   'fx'        : {year: fx_multiplier}             stochastic EUR-funding cost multiplier
+    #   'death_year': int                               year after which no household spending
+    #                                                    (longevity); also flips to survivor SS
+    #   'survivor_year': int                            year a spouse dies (single-filer onward)
+    #   'tax_mult'  : float                             multiplier on all tax rates (regime risk)
+    #   'ss_haircut': float (0-1)                       fractional SS benefit cut
+    #   'ltc_cost'  : {year: real_usd}                  extra real long-term-care spend by year
+    # Missing keys fall back to deterministic session-state values.
+    sc = scenario or {}
+    sc_returns = sc.get('returns')
+    sc_inflation = sc.get('inflation')
+    sc_fx = sc.get('fx')
+    sc_death_year = sc.get('death_year')
+    sc_tax_mult = sc.get('tax_mult', 1.0)
+    sc_ltc = sc.get('ltc_cost', {})
     MIKE_SS, STEPH_SS = get_ss_timelines(override_m_age, override_s_age)
     start_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
     move_yr = 2026 + (st.session_state.move_age - st.session_state.current_age)
@@ -242,11 +303,14 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
     bal_matrix, draw_matrix, tax_matrix, cont_matrix, wr_matrix = {}, {}, {}, {}, {}
     asset_rows = list(current_balances.keys())
     
-    fx_mult_global = st.session_state.fx_rate if st.session_state.fx_enable else 1.0
+    fx_mult_base = st.session_state.fx_rate if st.session_state.fx_enable else 1.0
     
     # State Tracker for Guardrails & Past Gifts
     spend_level = 1.0 
     cumulative_gifts_tracker = 0.0
+    # Cumulative inflation index (CPI=1.0 at 2026). With stochastic per-year inflation we
+    # must compound the actual realized path, not raise a single year's rate to a power.
+    cpi_index = 1.0
     
     def execute_draw(asset, gross_amount_native, statutory_tax_rate, is_brokerage, draws_dict, taxes_dict):
         if gross_amount_native <= 0 or current_balances[asset] <= 0: return 0.0
@@ -304,6 +368,16 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         # draw for the year. Glide-path de-risking below still applies on top.
         if return_overrides is not None and yr in return_overrides:
             usd_yr_return, eur_yr_return = return_overrides[yr]
+        if sc_returns is not None and yr in sc_returns:
+            usd_yr_return, eur_yr_return = sc_returns[yr]
+        # Multi-factor MC: per-year stochastic inflation and FX.
+        if sc_inflation is not None and yr in sc_inflation:
+            i_rate = sc_inflation[yr]
+        fx_mult_global = sc_fx[yr] if (sc_fx is not None and yr in sc_fx) else fx_mult_base
+
+        # Compound the realized inflation path into a CPI index (1.0 at 2026 base year).
+        if yr > 2026:
+            cpi_index *= (1 + i_rate)
         
         if st.session_state.glide_enable and age >= st.session_state.glide_start_age:
             years_in_glide = min(age, st.session_state.glide_end_age) - st.session_state.glide_start_age + 1
@@ -388,15 +462,15 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
             base_spend_usd = st.session_state.spend_wind
             floor_base_usd = st.session_state.floor_wind
             
-        target_lifestyle_usd = base_spend_usd * ((1 + i_rate) ** (yr - 2026))
-        floor_usd_inflated = floor_base_usd * ((1 + i_rate) ** (yr - 2026))
+        target_lifestyle_usd = base_spend_usd * cpi_index
+        floor_usd_inflated = floor_base_usd * cpi_index
         
         ss_m, ss_s = MIKE_SS.get(yr, 0), STEPH_SS.get(yr, 0)
-        gross_ss_usd = ss_m + ss_s
+        gross_ss_usd = (ss_m + ss_s) * (1 - sc.get('ss_haircut', 0.0))
         # US tax on SS persists even after the move under the treaty's savings clause
         # (US taxes its citizens under normal US rules regardless of residence).
         taxable_ss_usd = gross_ss_usd * (st.session_state.ss_taxable_pct / 100.0) if gross_ss_usd > 0 else 0.0
-        us_ss_tax_usd = taxable_ss_usd * (st.session_state.us_ss_tax_rate / 100.0)
+        us_ss_tax_usd = taxable_ss_usd * (st.session_state.us_ss_tax_rate / 100.0) * sc_tax_mult
         # Slovenia (residence country) may levy additional tax once resident; model the
         # NET incremental amount after US foreign-tax-credit offset (default 0).
         sl_ss_tax_usd = (gross_ss_usd * (st.session_state.sl_ss_net_rate / 100.0)) if (gross_ss_usd > 0 and is_slovenia) else 0.0
@@ -457,6 +531,16 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         # 4. Finalize Actual Targets
         actual_lifestyle_usd = target_lifestyle_usd * spend_level
         actual_gift_usd = base_gift_usd * spend_level
+
+        # Longevity: after both spouses have died, the household no longer spends or gifts
+        # (the estate phase). The portfolio simply grows to the bequest.
+        if sc_death_year is not None and yr > sc_death_year:
+            actual_lifestyle_usd = 0.0
+            actual_gift_usd = 0.0
+
+        # Long-term-care shock: an extra real (2026 $) cost layered on, inflated to nominal.
+        ltc_extra_usd = sc_ltc.get(yr, 0.0) * cpi_index if sc_ltc else 0.0
+        actual_lifestyle_usd += ltc_extra_usd
         
         # Capture actual WR for tracking (incorporating newly slashed level if applicable)
         final_eval_draw = max(0, actual_lifestyle_usd - net_ss_usd)
@@ -474,10 +558,10 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         
         draws, taxes = {a: 0.0 for a in asset_rows}, {a: 0.0 for a in asset_rows}
         
-        roth_tax_rate = (st.session_state.tax_roth / 100.0) if is_slovenia else 0.0
-        pretax_drip_rate = (st.session_state.tax_pretax_base / 100.0) if is_slovenia else 0.12
-        pretax_high_rate = (st.session_state.tax_pretax_excess / 100.0) if is_slovenia else 0.22
-        ibkr_rate = (st.session_state.tax_cap_gains / 100.0) if is_slovenia else 0.15 
+        roth_tax_rate = ((st.session_state.tax_roth / 100.0) if is_slovenia else 0.0) * sc_tax_mult
+        pretax_drip_rate = ((st.session_state.tax_pretax_base / 100.0) if is_slovenia else 0.12) * sc_tax_mult
+        pretax_high_rate = ((st.session_state.tax_pretax_excess / 100.0) if is_slovenia else 0.22) * sc_tax_mult
+        ibkr_rate = ((st.session_state.tax_cap_gains / 100.0) if is_slovenia else 0.15) * sc_tax_mult
 
         # Slovenian graduated capital-gains schedule by holding period (years held).
         # 0-5y: 25%, 5-10y: 20%, 10-15y: 15%, >15y: 0%. Applies once resident in
@@ -513,7 +597,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
             total_pretax_rmd = sum([current_balances[p] / divisor for p in pretax_accounts if current_balances[p] > 0])
             
             if total_pretax_rmd > 0:
-                std_ded_infl = 30000 * ((1 + i_rate) ** (yr - 2026))
+                std_ded_infl = 30000 * cpi_index
                 for pretax in pretax_accounts:
                     if current_balances[pretax] > 0:
                         rmd_gross = current_balances[pretax] / divisor
@@ -529,7 +613,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
                     
         elif st.session_state.enable_smoothing and age >= 60:
             draw_val = override_early_draw if override_early_draw is not None else st.session_state.target_early_draw
-            target_early_gross = draw_val * ((1 + i_rate) ** (yr - 2026))
+            target_early_gross = draw_val * cpi_index
             
             total_pretax = sum(current_balances[p] for p in pretax_accounts if current_balances[p] > 0)
             if total_pretax > 0 and target_early_gross > 0:
@@ -553,7 +637,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
                     remaining_eur_need -= pull_net_need(roth, remaining_eur_need, roth_tax_rate, False, draws, taxes, is_slovenia)
                     
             if age >= 60 and (age >= 75 or not st.session_state.enable_smoothing):
-                std_ded_net_equivalent = (30000 * ((1 + i_rate) ** (yr - 2026))) * (1 - pretax_drip_rate)
+                std_ded_net_equivalent = (30000 * cpi_index) * (1 - pretax_drip_rate)
                 drip_target_eur = min(remaining_eur_need, std_ded_net_equivalent / current_fx)
                 
                 total_pretax = sum(current_balances[p] for p in pretax_accounts if current_balances[p] > 0)
@@ -1256,6 +1340,31 @@ elif selection == "12. Monte Carlo Simulation":
              "success rate and the joint-success metric below."
     )
 
+    with st.expander("Stress Factors (randomize more than just equity returns)", expanded=True):
+        st.caption(
+            "By default the simulation randomizes only equity returns. These toggles add the "
+            "other big plan risks. Each is independent so you can isolate effects; the tornado "
+            "chart below quantifies how much each one moves your success rate."
+        )
+        f1, f2 = st.columns(2)
+        with f1:
+            st.session_state.mc_stoch_inflation = st.checkbox("Stochastic inflation", value=st.session_state.mc_stoch_inflation)
+            st.session_state.mc_infl_vol = st.number_input("Inflation volatility (std dev %)", value=st.session_state.mc_infl_vol, step=0.25)
+            st.session_state.mc_infl_equity_corr = st.number_input("Inflation/equity correlation", value=st.session_state.mc_infl_equity_corr, min_value=-1.0, max_value=1.0, step=0.05, help="Negative = high inflation tends to coincide with bad equity years (stagflation risk).")
+            st.session_state.mc_stoch_fx = st.checkbox("Stochastic EUR/USD", value=st.session_state.mc_stoch_fx)
+            st.session_state.mc_fx_vol = st.number_input("FX annual volatility (%)", value=st.session_state.mc_fx_vol, step=1.0, help="USD-funding cost of euro spending follows a random walk with this annual vol.")
+            st.session_state.mc_stoch_longevity = st.checkbox("Stochastic longevity (SSA tables)", value=st.session_state.mc_stoch_longevity)
+            st.session_state.mc_wife_age_offset = st.number_input("Spouse age offset (you minus spouse)", value=st.session_state.mc_wife_age_offset, step=1, help="Used to age the second life. Female table applied to spouse, male to you.")
+        with f2:
+            st.session_state.mc_ltc_enable = st.checkbox("Long-term care shock", value=st.session_state.mc_ltc_enable)
+            st.session_state.mc_ltc_prob = st.number_input("LTC lifetime probability (per person)", value=st.session_state.mc_ltc_prob, min_value=0.0, max_value=1.0, step=0.05)
+            st.session_state.mc_ltc_cost = st.number_input("LTC annual cost (real $)", value=st.session_state.mc_ltc_cost, step=5000)
+            st.session_state.mc_ltc_years = st.number_input("LTC duration (years)", value=st.session_state.mc_ltc_years, step=1)
+            st.session_state.mc_tax_regime = st.checkbox("Tax-regime uncertainty", value=st.session_state.mc_tax_regime)
+            st.session_state.mc_tax_vol = st.number_input("Tax-rate drift (std dev, fraction)", value=st.session_state.mc_tax_vol, step=0.05, help="A path-level multiplier on all tax rates, e.g. 0.15 = +/-15% rate uncertainty.")
+            st.session_state.mc_ss_haircut_prob = st.number_input("SS benefit-cut probability", value=st.session_state.mc_ss_haircut_prob, min_value=0.0, max_value=1.0, step=0.05, help="Chance the SS trust-fund shortfall triggers a benefit cut on your timeline.")
+            st.session_state.mc_ss_haircut_size = st.number_input("SS benefit-cut size", value=st.session_state.mc_ss_haircut_size, min_value=0.0, max_value=1.0, step=0.05)
+
     m1, m2, m3 = st.columns(3)
     st.session_state.mc_runs = m1.number_input("Number of Simulations", value=st.session_state.mc_runs, min_value=100, max_value=5000, step=100)
     st.session_state.mc_seed = m2.number_input("Random Seed (reproducibility)", value=st.session_state.mc_seed, step=1)
@@ -1348,6 +1457,70 @@ elif selection == "12. Monte Carlo Simulation":
         start_age = st.session_state.current_age
         ret_start_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
 
+        # ---- Stress-factor scenario builder (per path) ----
+        base_infl = st.session_state.inflation_rate / 100.0
+        infl_vol = st.session_state.mc_infl_vol / 100.0
+        infl_corr = st.session_state.mc_infl_equity_corr
+        fx_vol = st.session_state.mc_fx_vol / 100.0
+        fx_base = st.session_state.fx_rate
+        wife_offset = st.session_state.mc_wife_age_offset
+
+        def build_scenario(usd_draws, eur_draws):
+            sc = {}
+            # Inflation: correlated with equity (negative corr = stagflation risk). Use the
+            # USD equity z-score for the year to tilt inflation.
+            if st.session_state.mc_stoch_inflation:
+                infl = {}
+                eq_mean = np.mean(usd_draws); eq_sd = np.std(usd_draws) or 1e-9
+                for i, y in enumerate(years):
+                    eq_z = (usd_draws[i] - eq_mean) / eq_sd
+                    shock = rng.normal(0, infl_vol)
+                    yr_infl = base_infl + infl_corr * eq_z * infl_vol + np.sqrt(max(0, 1 - infl_corr**2)) * shock
+                    infl[y] = max(-0.02, yr_infl)  # floor at -2% (deflation bound)
+                sc['inflation'] = infl
+            # FX: geometric random walk around the base multiplier. Zero log-drift keeps the
+            # TYPICAL (median) path flat at today's rate with symmetric two-sided risk, so
+            # FX volatility neither helps nor hurts on average (a -0.5 sigma^2 drift would
+            # have made most paths end with cheaper euros, biasing FX to look beneficial).
+            if st.session_state.mc_stoch_fx:
+                fx = {}; lvl = fx_base
+                for y in years:
+                    lvl *= np.exp(rng.normal(0, fx_vol))
+                    fx[y] = lvl
+                sc['fx'] = fx
+            # Longevity: draw both death ages; spending stops after the later death.
+            if st.session_state.mc_stoch_longevity:
+                d_self = sample_death_age(start_age, SURV_MALE, rng)
+                d_spouse = sample_death_age(start_age - wife_offset, SURV_FEMALE, rng)
+                # spouse's death YEAR uses their own age timeline (offset)
+                self_death_yr = 2026 + (d_self - start_age)
+                spouse_death_yr = 2026 + (d_spouse - (start_age - wife_offset))
+                sc['death_year'] = min(2089, max(self_death_yr, spouse_death_yr))
+                sc['_first_death_yr'] = min(self_death_yr, spouse_death_yr)
+            # LTC: independent lifetime chance per person; cost over N years late in life.
+            if st.session_state.mc_ltc_enable:
+                ltc = {}
+                for _ in range(2):  # two people
+                    if rng.random() < st.session_state.mc_ltc_prob:
+                        onset_age = rng.integers(78, 90)
+                        onset_yr = 2026 + (onset_age - start_age)
+                        for k in range(int(st.session_state.mc_ltc_years)):
+                            yy = onset_yr + k
+                            if yy <= 2089:
+                                ltc[yy] = ltc.get(yy, 0) + st.session_state.mc_ltc_cost
+                if ltc: sc['ltc_cost'] = ltc
+            # Tax-regime drift: one multiplier per path.
+            if st.session_state.mc_tax_regime:
+                sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
+            # SS haircut: a path either gets the cut or not.
+            if rng.random() < st.session_state.mc_ss_haircut_prob:
+                sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
+            return sc
+
+        any_stress = (st.session_state.mc_stoch_inflation or st.session_state.mc_stoch_fx or
+                      st.session_state.mc_stoch_longevity or st.session_state.mc_ltc_enable or
+                      st.session_state.mc_tax_regime or st.session_state.mc_ss_haircut_prob > 0)
+
         # Target lifestyle in REAL 2026 $ is constant within each age band (golden/middle/
         # wind-down); recompute per retirement year so we can score actual vs target.
         def target_real_by_age(a):
@@ -1366,24 +1539,57 @@ elif selection == "12. Monte Carlo Simulation":
         full_lifestyle_path = []     # bool: avg funded ratio >= 95%
         first_cut_age = []           # age of first lifestyle cut (np.nan if none)
         worst_drawdown = []          # largest peak-to-trough real drop per path
+        path_success = []            # bool: money outlasted the household (true success)
+        fin_depletion_age = []       # age the portfolio actually hit zero (ignoring death)
+        death_age_arr = []           # survivor death age for this path (or 100 if not modeled)
 
         progress = st.progress(0.0, text="Running simulations...")
         for run in range(n_runs):
             usd_draws, eur_draws = make_paths()
-            overrides = {years[i]: (float(usd_draws[i]), float(eur_draws[i])) for i in range(n_years)}
-            df_bal, df_draw, _, _, _ = run_core_simulation(return_overrides=overrides)
+            ret_map = {years[i]: (float(usd_draws[i]), float(eur_draws[i])) for i in range(n_years)}
+            scen = build_scenario(usd_draws, eur_draws) if any_stress else {}
+            scen['returns'] = ret_map
+            df_bal, df_draw, _, _, _ = run_core_simulation(scenario=scen)
             total = df_bal.loc['Total Portfolio Balance']
 
-            real_series = np.array([total[y] / ((1 + inf_rate) ** (y - 2026)) for y in years])
+            # Per-path real discounting: use the path's realized inflation when stochastic,
+            # else the deterministic rate. Build a cumulative CPI discount factor by year.
+            if 'inflation' in scen:
+                disc_map = {}; cpi = 1.0
+                for y in years:
+                    if y > 2026: cpi *= (1 + scen['inflation'][y])
+                    disc_map[y] = cpi
+            else:
+                disc_map = {y: (1 + inf_rate) ** (y - 2026) for y in years}
+
+            real_series = np.array([total[y] / disc_map[y] for y in years])
             real_paths[run, :] = real_series
 
+            # Success = solvent through the survivor's actual death year (not a fixed 100).
+            # With stochastic longevity, dying early is NOT a planning "win": a path only
+            # succeeds if the money outlasts the household. Depletion AFTER both have died
+            # is irrelevant (you can't run out after you're gone), so it counts as success.
+            horizon_yr = scen.get('death_year', 2089)
             depleted = total[total <= 0]
             if len(depleted) > 0:
-                depletion_ages.append(depleted.index.min() - 2026 + start_age)
+                first_zero_yr = depleted.index.min()
+                if first_zero_yr <= horizon_yr:
+                    depletion_ages.append(first_zero_yr - 2026 + start_age)
+                    path_success.append(False)
+                else:
+                    success += 1
+                    depletion_ages.append(horizon_yr - 2026 + start_age)
+                    path_success.append(True)
             else:
                 success += 1
-                depletion_ages.append(100)
+                depletion_ages.append(horizon_yr - 2026 + start_age)
+                path_success.append(True)
             terminal_real.append(real_series[-1])
+
+            # Pure financial depletion age (when portfolio hit zero, regardless of death),
+            # and the survivor death age, for the conditional-solvency survival curve.
+            fin_depletion_age.append((depleted.index.min() - 2026 + start_age) if len(depleted) > 0 else 101)
+            death_age_arr.append((horizon_yr - 2026 + start_age) if 'death_year' in scen else 100)
 
             # --- Lifestyle quality (real 2026 $) ---
             life_nom = df_draw.loc["Actual Lifestyle Spend"]
@@ -1391,8 +1597,14 @@ elif selection == "12. Monte Carlo Simulation":
             achieved_real_total = 0.0
             cut_count = 0
             first_cut = np.nan
-            for y in ret_years:
-                disc = (1 + inf_rate) ** (y - 2026)
+            # Score lifestyle only over years the household is alive (longevity stops
+            # spending after death_year); otherwise post-death zero-spend years would
+            # wrongly count as lifestyle "cuts".
+            death_yr = scen.get('death_year', 9999)
+            scored_years = [y for y in ret_years if y <= death_yr]
+            scored_target = sum(target_real_map[y] for y in scored_years) or 1.0
+            for y in scored_years:
+                disc = disc_map[y]
                 achieved_real = life_nom.get(y, 0.0) / disc
                 achieved_real_total += achieved_real
                 tgt = target_real_map[y]
@@ -1400,14 +1612,14 @@ elif selection == "12. Monte Carlo Simulation":
                     cut_count += 1
                     if np.isnan(first_cut):
                         first_cut = start_age + (y - 2026)
-            ratio = (achieved_real_total / total_target_real) if total_target_real > 0 else 0.0
+            ratio = achieved_real_total / scored_target
             lifestyle_funded_ratio.append(ratio)
             years_below_target.append(cut_count)
             full_lifestyle_path.append(ratio >= 0.95)
             first_cut_age.append(first_cut)
 
             # --- Gifting (real 2026 $) ---
-            gift_total_real = sum(gift_nom.get(y, 0.0) / ((1 + inf_rate) ** (y - 2026)) for y in ret_years)
+            gift_total_real = sum(gift_nom.get(y, 0.0) / disc_map[y] for y in ret_years)
             lifetime_gift_real.append(gift_total_real)
 
             # --- Worst market shock experienced in the path ---
@@ -1439,50 +1651,65 @@ elif selection == "12. Monte Carlo Simulation":
         worst_drawdown = np.array(worst_drawdown)  # shape (n_runs, 2): [worst_1yr, worst_3yr]
         worst_1yr_arr = worst_drawdown[:, 0]
         worst_3yr_arr = worst_drawdown[:, 1]
+        path_success = np.array(path_success)
+        fin_depletion_age = np.array(fin_depletion_age)
+        death_age_arr = np.array(death_age_arr)
         success_rate = 100.0 * success / n_runs
 
-        # Joint success: never deplete AND avg lifestyle >= 95% AND hit gift goal.
-        never_deplete = depletion_ages >= 100
+        # Joint success: money outlasted the household AND avg lifestyle >= 95% AND hit gift goal.
+        never_deplete = path_success
         hit_gift = lifetime_gift_real >= gift_goal
         joint_success = never_deplete & full_lifestyle_path & hit_gift
         joint_rate = 100.0 * np.mean(joint_success)
 
         st.markdown("---")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Plan Success Rate (to age 100)", f"{success_rate:.1f}%")
+        c1.metric("Plan Success Rate", f"{success_rate:.1f}%",
+                  help="Money outlasted the household: solvent through the survivor's death "
+                       "(or to age 100 if longevity isn't randomized). Dying early is not counted as success.")
         c2.metric("Median Terminal Wealth (Real)", f"${np.median(terminal_real)/1e6:,.2f}M")
         c3.metric("10th-Pctile Terminal Wealth", f"${np.percentile(terminal_real,10)/1e6:,.2f}M")
-        c4.metric("10th-Pctile Depletion Age", f"{np.percentile(depletion_ages, 10):.0f}")
+        c4.metric("Median Survivor Death Age", f"{np.median(death_age_arr):.0f}" if st.session_state.mc_stoch_longevity else "100 (fixed)")
 
-        # Success rate by age: share of paths whose portfolio is still solvent AT each
-        # age (i.e. depletion age >= target age). Shown for ages 70-100.
+        # Financial survival by age, CONDITIONAL on the household still being alive: among
+        # paths where someone is alive at age X, the share still financially solvent. This
+        # is the honest "will the money be there if we live that long" curve, and it does
+        # not reward early death the way an unconditional curve would.
         st.markdown("---")
-        st.subheader("Success Rate by Age (Probability Portfolio Survives to Each Age)")
+        st.subheader("Financial Survival by Age (Solvent, Given You're Still Alive)")
         target_ages = list(range(70, 101))
-        survival = [100.0 * np.mean(depletion_ages >= a) for a in target_ages]
+        survival = []
+        for a in target_ages:
+            alive = death_age_arr >= a
+            n_alive = np.sum(alive)
+            if n_alive > 0:
+                survival.append(100.0 * np.mean(fin_depletion_age[alive] >= a))
+            else:
+                survival.append(np.nan)
 
         fig_surv = go.Figure()
         fig_surv.add_trace(go.Scatter(
             x=target_ages, y=survival, mode='lines+markers',
             line=dict(color='#1f77b4', width=3), marker=dict(size=5),
             fill='tozeroy', fillcolor='rgba(31,119,180,0.12)',
-            hovertemplate="Age %{x}: %{y:.1f}% of paths solvent<extra></extra>", name="Survival %"
+            hovertemplate="Age %{x}: %{y:.1f}% solvent (of those alive)<extra></extra>", name="Solvent %"
         ))
-        # Reference lines at common planning thresholds.
         for thr, lbl in [(95, "95%"), (90, "90%"), (80, "80%")]:
             fig_surv.add_hline(y=thr, line_dash="dot", line_color="grey", opacity=0.5,
                                annotation_text=lbl, annotation_position="right")
         fig_surv.update_layout(
-            xaxis=dict(title="Age", dtick=5), yaxis=dict(title="Probability Still Solvent (%)", range=[0, 101]),
+            xaxis=dict(title="Age", dtick=5), yaxis=dict(title="Solvent, of Those Alive (%)", range=[0, 101]),
             hovermode="x unified", showlegend=False, height=400
         )
         st.plotly_chart(fig_surv, use_container_width=True)
 
-        # Compact table at 5-year milestones.
         milestone_ages = [70, 75, 80, 85, 90, 95, 100]
+        def _solv(a):
+            alive = death_age_arr >= a
+            return f"{100.0*np.mean(fin_depletion_age[alive] >= a):.1f}%" if np.sum(alive) > 0 else "n/a"
         df_surv = pd.DataFrame({
             "Age": milestone_ages,
-            "Success Rate (%)": [f"{100.0 * np.mean(depletion_ages >= a):.1f}%" for a in milestone_ages]
+            "Solvent if Alive (%)": [_solv(a) for a in milestone_ages]
         }).set_index("Age").T
         st.dataframe(df_surv, use_container_width=True)
         st.caption(
@@ -1618,6 +1845,37 @@ elif selection == "12. Monte Carlo Simulation":
         else:
             st.info("No lifestyle cuts occurred in any simulated path under these settings.")
 
+        # ----------------------------------------------------------------------
+        # LONGEVITY TAIL: the real longevity risk is living long, not the average
+        # ----------------------------------------------------------------------
+        if st.session_state.mc_stoch_longevity:
+            st.markdown("---")
+            st.subheader("Longevity Tail Risk")
+            st.markdown(
+                "Longevity's danger isn't the average case (most people don't reach 100) but the "
+                "**tail** where one of you lives a long time. These show how the plan holds up "
+                "specifically in the long-life paths."
+            )
+            long_paths = death_age_arr >= 90
+            very_long = death_age_arr >= 95
+            lt1, lt2, lt3 = st.columns(3)
+            lt1.metric("Survivor Reaches 90+", f"{100.0*np.mean(long_paths):.0f}%",
+                       help="Share of paths where at least one spouse lives to 90 or beyond.")
+            if np.sum(long_paths) > 0:
+                lt2.metric("Success | Survivor Lives 90+", f"{100.0*np.mean(path_success[long_paths]):.0f}%",
+                           help="Plan-success rate conditional on a long life (90+). This is the number that matters.")
+            if np.sum(very_long) > 0:
+                lt3.metric("Success | Survivor Lives 95+", f"{100.0*np.mean(path_success[very_long]):.0f}%")
+            overall_succ = np.mean(path_success)*100
+            cond_succ = np.mean(path_success[long_paths])*100 if np.sum(long_paths) > 0 else overall_succ
+            st.caption(
+                f"Overall success is {overall_succ:.0f}%, but conditional on a survivor reaching 90+ it is "
+                f"{cond_succ:.0f}%. The gap is your true longevity exposure: the plan is "
+                + ("meaningfully weaker" if overall_succ - cond_succ > 8 else "fairly robust")
+                + " in long-life scenarios. This is why longevity is shown here rather than in the tornado "
+                "(it shifts the success horizon rather than acting as a market-style shock)."
+            )
+
         if use_bootstrap:
             st.caption(
                 "Block bootstrap preserves real historical volatility, fat tails, and the clustering "
@@ -1633,3 +1891,159 @@ elif selection == "12. Monte Carlo Simulation":
                 "year (no clustering of crashes). Switch to Historical Block Bootstrap for a more "
                 "realistic tail and sequence-of-returns risk."
             )
+
+    # ======================================================================
+    # SENSITIVITY TORNADO: isolate each factor's marginal impact on success
+    # ======================================================================
+    st.markdown("---")
+    st.subheader("Sensitivity Tornado (Marginal Impact of Each Assumption)")
+    st.markdown(
+        "Runs the simulation once with **only equity returns random** (baseline), then turns "
+        "on **one stress factor at a time**, holding everything else at base. The bars show "
+        "how many percentage points each factor moves your plan-success rate. This tells you "
+        "which risk your plan is actually most fragile to."
+    )
+    tornado_runs = st.number_input("Simulations per factor (lower = faster)", value=400, min_value=100, max_value=2000, step=100, key="tornado_runs")
+
+    if st.button("Run Sensitivity Tornado"):
+        t_years = list(range(2026, 2090)); t_n = len(t_years)
+        t_inf = st.session_state.inflation_rate / 100.0
+        t_start = st.session_state.current_age
+        t_ret_start = 2026 + (st.session_state.ret_age - st.session_state.current_age)
+        t_ret_years = [y for y in t_years if y >= t_ret_start]
+        t_gift_goal = float(st.session_state.mc_gift_goal)
+        def t_tgt(a):
+            return st.session_state.spend_golden if a < 70 else (st.session_state.spend_middle if a < 85 else st.session_state.spend_wind)
+        t_tmap = {y: t_tgt(t_start + (y - 2026)) for y in t_ret_years}
+        t_total_tgt = sum(t_tmap.values()) or 1.0
+
+        # Return generator: reuse block bootstrap (paired) for consistency.
+        t_common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
+        t_uh = np.array([SP500_BY_YEAR[y] for y in t_common]) / 100.0
+        t_eh = np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in t_common]) / 100.0
+        t_block = int(st.session_state.mc_block_len); t_nb = len(t_common) - t_block + 1
+        t_um = st.session_state.usd_market_return/100.0 + np.var(t_uh)/2
+        t_em = st.session_state.eur_market_return/100.0 + np.var(t_eh)/2
+
+        def t_make(rng):
+            idx = []
+            while len(idx) < t_n:
+                s = rng.integers(0, t_nb); idx.extend(range(s, s + t_block))
+            idx = np.array(idx[:t_n])
+            u = t_uh[idx] - t_uh[idx].mean() + t_um
+            e = t_eh[idx] - t_eh[idx].mean() + t_em
+            return u, e
+
+        def t_scenario(flag, usd, eur, rng):
+            sc = {}
+            if flag == 'inflation':
+                infl = {}; em = np.mean(usd); es = np.std(usd) or 1e-9
+                ic = st.session_state.mc_infl_equity_corr; iv = st.session_state.mc_infl_vol/100.0
+                for i, y in enumerate(t_years):
+                    z = (usd[i]-em)/es
+                    infl[y] = max(-0.02, t_inf + ic*z*iv + np.sqrt(max(0,1-ic**2))*rng.normal(0,iv))
+                sc['inflation'] = infl
+            elif flag == 'fx':
+                fxv = st.session_state.mc_fx_vol/100.0; lvl = st.session_state.fx_rate; fx = {}
+                for y in t_years:
+                    lvl *= np.exp(rng.normal(0, fxv)); fx[y] = lvl
+                sc['fx'] = fx
+            elif flag == 'longevity':
+                ds = sample_death_age(t_start, SURV_MALE, rng)
+                dp = sample_death_age(t_start - st.session_state.mc_wife_age_offset, SURV_FEMALE, rng)
+                sy = 2026 + (ds - t_start); py = 2026 + (dp - (t_start - st.session_state.mc_wife_age_offset))
+                sc['death_year'] = min(2089, max(sy, py))
+            elif flag == 'ltc':
+                ltc = {}
+                for _ in range(2):
+                    if rng.random() < st.session_state.mc_ltc_prob:
+                        oy = 2026 + (int(rng.integers(78,90)) - t_start)
+                        for k in range(int(st.session_state.mc_ltc_years)):
+                            if oy+k <= 2089: ltc[oy+k] = ltc.get(oy+k,0)+st.session_state.mc_ltc_cost
+                if ltc: sc['ltc_cost'] = ltc
+            elif flag == 'tax':
+                sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
+            elif flag == 'ss':
+                if rng.random() < st.session_state.mc_ss_haircut_prob:
+                    sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
+            return sc
+
+        def t_run(flag, n, seed=12345):
+            # Common random numbers: equity paths use a FIXED seed across all factor runs,
+            # so the baseline and each factor see identical markets and the only difference
+            # is the factor itself. Factor draws use a separate stream.
+            eq_rng = np.random.default_rng(seed)
+            fac_rng = np.random.default_rng(seed + 7777)
+            joint_ok = 0
+            for _ in range(n):
+                usd, eur = t_make(eq_rng)
+                sc = t_scenario(flag, usd, eur, fac_rng) if flag else {}
+                sc['returns'] = {t_years[i]: (float(usd[i]), float(eur[i])) for i in range(t_n)}
+                db, dd, _, _, _ = run_core_simulation(scenario=sc)
+                tot = db.loc['Total Portfolio Balance']
+                # Success = money outlasts the household (solvent through death year / 100).
+                horizon = sc.get('death_year', 2089)
+                depl = tot[tot <= 0]
+                nd = (len(depl) == 0) or (depl.index.min() > horizon)
+                # per-path real discount
+                if 'inflation' in sc:
+                    dm = {}; cpi = 1.0
+                    for y in t_years:
+                        if y > 2026: cpi *= (1+sc['inflation'][y])
+                        dm[y] = cpi
+                else:
+                    dm = {y:(1+t_inf)**(y-2026) for y in t_years}
+                life = dd.loc["Actual Lifestyle Spend"]; gift = dd.loc["Actual Generational Drip"]
+                dy = sc.get('death_year', 9999); sy = [y for y in t_ret_years if y <= dy]
+                stgt = sum(t_tmap[y] for y in sy) or 1.0
+                ar = sum(life.get(y,0)/dm[y] for y in sy)
+                full = (ar/stgt) >= 0.95
+                gtot = sum(gift.get(y,0)/dm[y] for y in t_ret_years)
+                if nd and full and gtot >= t_gift_goal: joint_ok += 1
+            return 100.0 * joint_ok / n
+
+        tn = int(st.session_state.tornado_runs)
+        prog = st.progress(0.0, text="Running tornado...")
+        baseline = t_run(None, tn); prog.progress(1/8, text="Baseline done")
+        factors = [
+            ('inflation', 'Stochastic Inflation', st.session_state.mc_stoch_inflation),
+            ('fx', 'EUR/USD Exchange Rate', st.session_state.mc_stoch_fx),
+            # Longevity is intentionally excluded from the tornado: it changes the success
+            # HORIZON rather than acting as a shock, so its "impact" is an artifact of most
+            # people not living to 100. Its real (tail) risk is shown in the longevity panel.
+            ('ltc', 'Long-Term Care Shock', st.session_state.mc_ltc_enable),
+            ('tax', 'Tax-Regime Drift', st.session_state.mc_tax_regime),
+            ('ss', 'Social Security Cut', st.session_state.mc_ss_haircut_prob > 0),
+        ]
+        results = []
+        for i, (flag, label, enabled) in enumerate(factors):
+            if not enabled:
+                continue
+            rate = t_run(flag, tn)
+            results.append((label, rate - baseline))
+            prog.progress((i+2)/8, text=f"{label} done")
+        prog.progress(1.0, text="Complete.")
+
+        st.metric("Baseline Joint-Success (equity returns only)", f"{baseline:.1f}%")
+        if results:
+            results.sort(key=lambda r: r[1])  # most negative (most damaging) first
+            labels = [r[0] for r in results]
+            deltas = [r[1] for r in results]
+            colors = ['#d62728' if d < 0 else '#2ca02c' for d in deltas]
+            fig_t = go.Figure(go.Bar(x=deltas, y=labels, orientation='h', marker_color=colors,
+                                     text=[f"{d:+.1f} pts" for d in deltas], textposition='outside'))
+            fig_t.update_layout(
+                title="Marginal Impact on Joint-Success Rate (percentage points vs baseline)",
+                xaxis_title="Change in Joint-Success Rate (pts)", height=350,
+                margin=dict(l=10, r=40, t=40, b=10)
+            )
+            st.plotly_chart(fig_t, use_container_width=True)
+            worst = results[0]
+            st.caption(
+                f"Your plan is most fragile to **{worst[0]}** ({worst[1]:+.1f} pts). Factors are tested "
+                "one at a time against an equity-only baseline, so they don't include interaction effects "
+                "(the combined simulation above captures those). Enable factors in the panel above to "
+                "include them here."
+            )
+        else:
+            st.info("No stress factors are enabled. Turn some on in the Stress Factors panel above.")
