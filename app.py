@@ -116,7 +116,7 @@ if 'mc_block_len' not in st.session_state: st.session_state.mc_block_len = 5
 # or as the raw ARITHMETIC mean of annual returns (realized compounding is then lower).
 if 'mc_mean_type' not in st.session_state: st.session_state.mc_mean_type = "Compound (CAGR) target"
 # Explicit lifetime gifting goal (real 2026 $) to measure "gift success" against in MC.
-if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 750000
+if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 1500000
 # Multi-factor stress toggles and parameters for the Monte Carlo.
 if 'mc_stoch_inflation' not in st.session_state: st.session_state.mc_stoch_inflation = True
 if 'mc_infl_vol' not in st.session_state: st.session_state.mc_infl_vol = 1.5
@@ -133,6 +133,22 @@ if 'mc_tax_regime' not in st.session_state: st.session_state.mc_tax_regime = Tru
 if 'mc_tax_vol' not in st.session_state: st.session_state.mc_tax_vol = 0.15
 if 'mc_ss_haircut_prob' not in st.session_state: st.session_state.mc_ss_haircut_prob = 0.50
 if 'mc_ss_haircut_size' not in st.session_state: st.session_state.mc_ss_haircut_size = 0.20
+
+# Valuation conditioning (CAPE -> forward return) and the crisis-regime overlay. These must
+# be initialized at module scope: the Monte Carlo UI widgets read them directly, and the
+# shared helpers (build_valuation_shift / apply_crisis_overlay) reference them on every page.
+if 'mc_valuation_enable' not in st.session_state: st.session_state.mc_valuation_enable = True
+if 'mc_cape_implied_usd' not in st.session_state: st.session_state.mc_cape_implied_usd = 3.0
+if 'mc_cape_implied_eur' not in st.session_state: st.session_state.mc_cape_implied_eur = 5.0
+if 'mc_reversion_years' not in st.session_state: st.session_state.mc_reversion_years = 12
+if 'mc_valuation_strength' not in st.session_state: st.session_state.mc_valuation_strength = 1.0
+if 'mc_crisis_enable' not in st.session_state: st.session_state.mc_crisis_enable = True
+if 'mc_crisis_freq' not in st.session_state: st.session_state.mc_crisis_freq = 0.15
+if 'mc_crisis_persist' not in st.session_state: st.session_state.mc_crisis_persist = 0.45
+if 'mc_crisis_usd_mean' not in st.session_state: st.session_state.mc_crisis_usd_mean = -22.0
+if 'mc_crisis_vol' not in st.session_state: st.session_state.mc_crisis_vol = 22.0
+if 'mc_crisis_eur_drag' not in st.session_state: st.session_state.mc_crisis_eur_drag = 0.90
+if 'mc_crisis_bond_mean' not in st.session_state: st.session_state.mc_crisis_bond_mean = -6.0
 
 # Survivor scenario: between the first and second death, model the survivor's economics.
 # The survivor keeps the LARGER SS benefit (smaller is lost); spending drops to the
