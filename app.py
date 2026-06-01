@@ -310,6 +310,128 @@ def score_joint_success_for_ss(n_runs, seed, m_age, s_age):
     return 100.0 * ok / n_runs
 
 
+def dashboard_full_stress_metrics(n_runs, seed):
+    """Runs the SAME full-stress engine as Page 12 (valuation conditioning + crisis overlay +
+    EUR bond sleeve + every enabled stress factor: stochastic inflation, FX, longevity, LTC,
+    tax-regime drift, SS haircut, and the survivor scenario) and returns three things:
+      - never_deplete %: share of paths solvent through the survivor's death (true success)
+      - full_lifestyle %: share also funding >=95% of real target lifestyle (the stricter bar)
+      - (ages, by_age): never-deplete probability conditional on living to each age 70-100
+    This is the honest dashboard number; it deliberately mirrors Page 12 rather than the old
+    light engine, so the headline matches the rigorous analysis."""
+    import numpy as _np
+    years = list(range(2026, 2090)); nN = len(years)
+    inf = st.session_state.inflation_rate / 100.0
+    start = st.session_state.current_age
+    ret_start = 2026 + (st.session_state.ret_age - st.session_state.current_age)
+    ret_years = [y for y in years if y >= ret_start]
+    def _tgt(a):
+        return st.session_state.spend_golden if a < 70 else (st.session_state.spend_middle if a < 85 else st.session_state.spend_wind)
+    target_real_map = {y: _tgt(start + (y - 2026)) for y in ret_years}
+
+    common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
+    uh = _np.array([SP500_BY_YEAR[y] for y in common]) / 100.0
+    eh = _np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common]) / 100.0
+    block = int(st.session_state.get('mc_block_len', 5)); nb = len(common) - block + 1
+    um = st.session_state.usd_market_return/100.0 + _np.var(uh)/2
+    em = st.session_state.eur_market_return/100.0 + _np.var(eh)/2
+    bm = st.session_state.bond_mean/100.0; bv = st.session_state.bond_vol/100.0
+    cn = st.session_state.bond_eq_corr; cc = st.session_state.bond_eq_corr_crisis
+    vsu, vse = build_valuation_shift(nN, st.session_state.usd_market_return/100.0, st.session_state.eur_market_return/100.0)
+
+    base_infl = st.session_state.inflation_rate/100.0
+    infl_vol = st.session_state.mc_infl_vol/100.0
+    infl_corr = st.session_state.mc_infl_equity_corr
+    fx_vol = st.session_state.mc_fx_vol/100.0; fx_base = st.session_state.fx_rate
+    woff = st.session_state.mc_wife_age_offset
+
+    rng = _np.random.default_rng(seed)
+    depl_living_ages = []   # financial depletion age (or 101)
+    death_ages = []         # survivor death age (or 101 if longevity off)
+    path_success = []       # solvent through death
+    full_life = []          # also funded >=95% lifestyle
+    for _ in range(n_runs):
+        idx = []
+        while len(idx) < nN:
+            s = rng.integers(0, nb); idx.extend(range(s, s + block))
+        idx = _np.array(idx[:nN])
+        u = uh[idx]-uh[idx].mean()+um+vsu; e = eh[idx]-eh[idx].mean()+em+vse
+        mu = u.mean(); sd = u.std() or 1e-9; zb = rng.standard_normal(nN); b = _np.empty(nN)
+        for i, r in enumerate(u):
+            z = (r-mu)/sd; c = cc if (z < -1.0 and r < 0) else cn
+            b[i] = bm + bv*(c*z + _np.sqrt(max(0.0,1-c**2))*zb[i])
+        u, e, b = apply_crisis_overlay(u, e, b, rng)
+        sc = {'returns': {years[i]: (float(u[i]), float(e[i])) for i in range(nN)},
+              'bond': {years[i]: float(b[i]) for i in range(nN)}}
+        # Full stress factors (mirror Page 12 build_scenario).
+        if st.session_state.mc_stoch_inflation:
+            infl = {}
+            for i, y in enumerate(years):
+                eq_z = (u[i] - mu)/sd
+                infl[y] = max(-0.02, base_infl + infl_corr*eq_z*infl_vol + _np.sqrt(max(0,1-infl_corr**2))*rng.normal(0, infl_vol))
+            sc['inflation'] = infl
+        if st.session_state.mc_stoch_fx:
+            fx = {}; lvl = fx_base
+            for y in years: lvl *= _np.exp(rng.normal(0, fx_vol)); fx[y] = lvl
+            sc['fx'] = fx
+        death_yr = 2089
+        if st.session_state.mc_stoch_longevity:
+            d_self = sample_death_age(start, SURV_MALE, rng)
+            d_sp = sample_death_age(start - woff, SURV_FEMALE, rng)
+            sy = 2026 + (d_self - start); py = 2026 + (d_sp - (start - woff))
+            death_yr = min(2089, max(sy, py))
+            sc['death_year'] = death_yr; sc['_first_death_yr'] = min(sy, py)
+        if st.session_state.mc_ltc_enable:
+            ltc = {}
+            for _p in range(2):
+                if rng.random() < st.session_state.mc_ltc_prob:
+                    onset = 2026 + (int(rng.integers(78,90)) - start)
+                    for kk in range(int(st.session_state.mc_ltc_years)):
+                        if onset+kk <= 2089: ltc[onset+kk] = ltc.get(onset+kk,0)+st.session_state.mc_ltc_cost
+            if ltc: sc['ltc_cost'] = ltc
+        if st.session_state.mc_tax_regime:
+            sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
+        if rng.random() < st.session_state.mc_ss_haircut_prob:
+            sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
+
+        db, dd, _, _, _ = run_core_simulation(scenario=sc)
+        tot = db.loc['Total Portfolio Balance']
+        zeros = tot[tot <= 0]
+        first_zero_yr = zeros.index.min() if len(zeros) > 0 else None
+        # Success = solvent through the household's death (not a fixed 100).
+        if first_zero_yr is None or first_zero_yr > death_yr:
+            path_success.append(True)
+        else:
+            path_success.append(False)
+        depl_living_ages.append((first_zero_yr - 2026 + start) if first_zero_yr is not None else 101)
+        death_ages.append((death_yr - 2026 + start) if st.session_state.mc_stoch_longevity else 100)
+        # Lifestyle funding (real), scored only over living years.
+        if 'inflation' in sc:
+            dm = {}; cpi = 1.0
+            for y in years:
+                if y > 2026: cpi *= (1+sc['inflation'][y])
+                dm[y] = cpi
+        else:
+            dm = {y: (1+inf)**(y-2026) for y in years}
+        scored = [y for y in ret_years if y <= death_yr]
+        stgt = sum(target_real_map[y] for y in scored) or 1.0
+        life = dd.loc["Actual Lifestyle Spend"]
+        ar = sum(life.get(y,0)/dm[y] for y in scored)
+        full_life.append(path_success[-1] and (ar/stgt) >= 0.95)
+
+    path_success = _np.array(path_success); full_life = _np.array(full_life)
+    depl = _np.array(depl_living_ages); dage = _np.array(death_ages)
+    never_deplete = 100.0 * path_success.mean()
+    full_lifestyle = 100.0 * full_life.mean()
+    # By-age curve: unconditional probability the PORTFOLIO is still solvent at each age
+    # (financial depletion age >= a). This is guaranteed monotonic non-increasing and is the
+    # clean "will the money still be there at age X" line. (Conditioning on being alive made
+    # the tail noisy because few paths reach 100.)
+    ages = list(range(70, 101))
+    by_age = [100.0 * _np.mean(depl >= a) for a in ages]
+    return never_deplete, full_lifestyle, ages, by_age
+
+
 # Bifurcated Glide Path
 if 'glide_enable' not in st.session_state: st.session_state.glide_enable = True
 if 'glide_start_age' not in st.session_state: st.session_state.glide_start_age = 65
@@ -967,96 +1089,69 @@ if selection == "1. Executive Dashboard":
     
     st.markdown("---")
 
-    # ---- Plan Success Probability (Monte Carlo) ----
-    # Layperson-friendly headline: the chance the money lasts, plus how that confidence
-    # holds up at older ages. Computed with a fast bootstrap MC and cached in session_state
-    # so it doesn't recompute on every widget interaction; a button refreshes it.
+    # ---- Plan Success Probability (FULL-STRESS Monte Carlo, mirrors Page 12) ----
+    # This uses the SAME conditioned, crisis-prone, multi-factor engine as the Monte Carlo
+    # page (valuation conditioning + crisis overlay + EUR bond sleeve + stochastic inflation,
+    # FX, longevity, LTC, tax-regime drift, SS haircut, survivor scenario). It is intentionally
+    # the honest number, not a blue-sky one. Two gauges: "never run out" and the stricter
+    # "fully fund the lifestyle you planned." Cached so it doesn't recompute every interaction.
     st.subheader("Plan Success Probability")
-    dash_runs = 300
+    dash_runs = 400
 
-    def _dashboard_success():
-        import numpy as _np
-        years = list(range(2026, 2090)); nN = len(years)
-        start = st.session_state.current_age
-        common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
-        uh = _np.array([SP500_BY_YEAR[y] for y in common]) / 100.0
-        eh = _np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common]) / 100.0
-        block = int(st.session_state.get('mc_block_len', 5)); nb = len(common) - block + 1
-        um = st.session_state.usd_market_return/100.0 + _np.var(uh)/2
-        em = st.session_state.eur_market_return/100.0 + _np.var(eh)/2
-        bmean = st.session_state.bond_mean/100.0
-        rng = _np.random.default_rng(2026)
-        ages = list(range(70, 101))
-        # For each path, record the age the portfolio depletes (or 101 if it survives).
-        depl_ages = []
-        for _ in range(dash_runs):
-            idx = []
-            while len(idx) < nN:
-                s = rng.integers(0, nb); idx.extend(range(s, s + block))
-            idx = _np.array(idx[:nN])
-            u = uh[idx]-uh[idx].mean()+um; e = eh[idx]-eh[idx].mean()+em
-            sc = {'returns': {years[i]: (float(u[i]), float(e[i])) for i in range(nN)},
-                  'bond': {years[i]: bmean for i in range(nN)}}
-            tot = run_core_simulation(scenario=sc)[0].loc['Total Portfolio Balance']
-            z = tot[tot <= 0]
-            depl_ages.append((z.index.min() - 2026 + start) if len(z) > 0 else 101)
-        depl_ages = _np.array(depl_ages)
-        overall = 100.0 * _np.mean(depl_ages >= 100)
-        by_age = [100.0 * _np.mean(depl_ages >= a) for a in ages]
-        return overall, ages, by_age
+    if st.button("Refresh Success Probability") or 'dash_success_v2' not in st.session_state:
+        with st.spinner(f"Running {dash_runs} full-stress simulations (valuation + crisis + all factors)..."):
+            st.session_state.dash_success_v2 = dashboard_full_stress_metrics(dash_runs, seed=2026)
+    never_succ, full_succ, succ_ages, succ_by_age = st.session_state.dash_success_v2
 
-    if st.button("Refresh Success Probability") or 'dash_success' not in st.session_state:
-        with st.spinner(f"Running {dash_runs} simulations..."):
-            st.session_state.dash_success = _dashboard_success()
-    overall_succ, succ_ages, succ_by_age = st.session_state.dash_success
+    def _band(v): return "#2ca02c" if v >= 85 else ("#ff9800" if v >= 70 else "#d62728")
+    def _gauge(value, title):
+        return go.Figure(go.Indicator(
+            mode="gauge+number", value=value, number={'suffix': "%", 'font': {'size': 40}},
+            title={'text': title},
+            gauge={'axis': {'range': [0, 100], 'ticksuffix': "%"},
+                   'bar': {'color': _band(value), 'thickness': 0.3},
+                   'steps': [{'range': [0, 70], 'color': "rgba(214,39,40,0.18)"},
+                             {'range': [70, 85], 'color': "rgba(255,152,0,0.18)"},
+                             {'range': [85, 100], 'color': "rgba(44,160,44,0.18)"}],
+                   'threshold': {'line': {'color': "black", 'width': 3}, 'thickness': 0.75, 'value': value}}
+        )).update_layout(height=240, margin=dict(l=20, r=20, t=70, b=10))
 
-    # Color the headline by confidence band.
-    band = "#2ca02c" if overall_succ >= 85 else ("#ff9800" if overall_succ >= 70 else "#d62728")
-    g1, g2 = st.columns([1, 1.4])
+    g1, g2 = st.columns(2)
     with g1:
-        fig_gauge = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=overall_succ,
-            number={'suffix': "%", 'font': {'size': 44}},
-            title={'text': "Chance Your Plan Succeeds<br><span style='font-size:0.8em;color:gray'>(money lasts to age 100)</span>"},
-            gauge={
-                'axis': {'range': [0, 100], 'ticksuffix': "%"},
-                'bar': {'color': band, 'thickness': 0.3},
-                'steps': [
-                    {'range': [0, 70], 'color': "rgba(214,39,40,0.18)"},
-                    {'range': [70, 85], 'color': "rgba(255,152,0,0.18)"},
-                    {'range': [85, 100], 'color': "rgba(44,160,44,0.18)"},
-                ],
-                'threshold': {'line': {'color': "black", 'width': 3}, 'thickness': 0.75, 'value': overall_succ}
-            }
-        ))
-        fig_gauge.update_layout(height=260, margin=dict(l=20, r=20, t=70, b=10))
-        st.plotly_chart(fig_gauge, use_container_width=True)
+        st.plotly_chart(_gauge(never_succ, "Money Never Runs Out<br><span style='font-size:0.78em;color:gray'>(solvent through your lifetime)</span>"), use_container_width=True)
     with g2:
-        fig_age = go.Figure(go.Scatter(
-            x=succ_ages, y=succ_by_age, mode='lines',
-            line=dict(color='#08519c', width=4), fill='tozeroy', fillcolor='rgba(8,81,156,0.12)',
-            hovertemplate="If you live to %{x}: %{y:.0f}% chance the money lasts<extra></extra>"
-        ))
-        fig_age.add_hline(y=85, line_dash="dot", line_color="#2ca02c", opacity=0.6,
-                          annotation_text="comfortable (85%)", annotation_position="bottom right")
-        fig_age.update_layout(
-            title="How confident, if you live longer?",
-            xaxis_title="Age", yaxis=dict(title="Chance money still lasts", range=[0, 101], ticksuffix="%"),
-            height=260, margin=dict(l=10, r=10, t=40, b=10)
-        )
-        st.plotly_chart(fig_age, use_container_width=True)
+        st.plotly_chart(_gauge(full_succ, "Full Lifestyle Funded<br><span style='font-size:0.78em;color:gray'>(no spending cuts, \u226595% of plan)</span>"), use_container_width=True)
 
-    # Plain-language one-liner anyone can read.
-    verdict = ("on very solid ground" if overall_succ >= 85 else
-               "in reasonable shape, with some risk to watch" if overall_succ >= 70 else
+    fig_age = go.Figure(go.Scatter(
+        x=succ_ages, y=succ_by_age, mode='lines',
+        line=dict(color='#08519c', width=4), fill='tozeroy', fillcolor='rgba(8,81,156,0.12)',
+        hovertemplate="Age %{x}: %{y:.0f}% chance the money is still there<extra></extra>"
+    ))
+    fig_age.add_hline(y=85, line_dash="dot", line_color="#2ca02c", opacity=0.6,
+                      annotation_text="comfortable (85%)", annotation_position="bottom right")
+    fig_age.update_layout(
+        title="Chance the money is still there at each age",
+        xaxis_title="Age", yaxis=dict(title="Chance money still lasts", range=[0, 101], ticksuffix="%"),
+        height=300, margin=dict(l=10, r=10, t=50, b=10)
+    )
+    st.plotly_chart(fig_age, use_container_width=True)
+
+    verdict = ("on very solid ground" if never_succ >= 85 else
+               "in reasonable shape, with real risk to watch" if never_succ >= 70 else
                "facing meaningful shortfall risk")
-    age90 = succ_by_age[succ_ages.index(90)] if 90 in succ_ages else overall_succ
+    valid_age90 = succ_by_age[succ_ages.index(90)] if 90 in succ_ages else never_succ
     st.markdown(
-        f"**In plain terms:** across {dash_runs} simulated futures, your plan funds your full lifestyle "
-        f"to age 100 about **{overall_succ:.0f}%** of the time \u2014 you're {verdict}. Even if you live to "
-        f"**90**, there's about a **{age90:.0f}%** chance the money is still there. Green is comfortable "
-        f"(85%+), amber is caution (70-85%), red is concern (below 70%)."
+        f"**In plain terms:** across {dash_runs} simulated futures \u2014 stress-tested for today's high "
+        f"valuations, market crashes, inflation, currency swings, long life, care costs, and tax/benefit "
+        f"changes \u2014 your money lasts your lifetime about **{never_succ:.0f}%** of the time, and you fund "
+        f"your *full* planned lifestyle with no cuts about **{full_succ:.0f}%** of the time. You're {verdict}. "
+        f"The gap between the two gauges is how often you'd survive but have to tighten spending. Green is "
+        f"comfortable (85%+), amber caution (70-85%), red concern (below 70%)."
+    )
+    st.caption(
+        "This is the **honest, fully stress-tested** number \u2014 it mirrors the Monte Carlo page's conditioned, "
+        "crisis-prone engine rather than a best-case projection, so it will read lower than a naive run. "
+        "Adjust the stress assumptions on Page 12; this dashboard reflects whatever factors are enabled there."
     )
 
     st.subheader(f"Asset & Tax Lot Balances ({start_yr}-2089)")
