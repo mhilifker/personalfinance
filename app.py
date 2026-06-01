@@ -919,7 +919,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
 # PAGE ROUTING
 # -----------------------------------------------------------------------------
 st.sidebar.title("Navigation")
-selection = st.sidebar.radio("Navigate", ["1. Executive Dashboard", "2. Pre-Set Asset Ledger & Tax Lots", "3. Investment Policy Editor", "4. Real Estate & Relocation", "5. The Great Reset Simulator", "6. Social Security & Pensions", "7. Cash Flow & Slovenian Drip", "8. Yearly Balances (2026-2089)", "9. Tax Torpedo Optimizer", "10. Institutional Stress Testing", "11. Longevity Optimizer (Guardrails)", "12. Monte Carlo Simulation", "13. Roth Conversion Ladder Optimizer"])
+selection = st.sidebar.radio("Navigate", ["1. Executive Dashboard", "2. Pre-Set Asset Ledger & Tax Lots", "3. Investment Policy Editor", "4. Real Estate & Relocation", "5. The Great Reset Simulator", "6. Social Security & Pensions", "7. Cash Flow & Slovenian Drip", "8. Yearly Balances (2026-2089)", "9. Tax Torpedo Optimizer", "10. Institutional Stress Testing", "11. Longevity Optimizer (Guardrails)", "12. Monte Carlo Simulation", "13. Roth Conversion Ladder Optimizer", "14. Variance Decomposition (Sobol)"])
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Quick Stress Scenarios")
@@ -950,32 +950,98 @@ if selection == "1. Executive Dashboard":
     inf_rate = st.session_state.inflation_rate / 100.0
     
     st.markdown("---")
-    
-    zero_years = df_bal.columns[df_bal.loc['Total Portfolio Balance'] <= 0]
-    if len(zero_years) > 0:
-        zero_yr = zero_years.min()
-        longevity_age = zero_yr - 2026 + st.session_state.current_age
-    else:
-        longevity_age = 100
-        
-    fig_gauge = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = longevity_age,
-        title = {'text': "Projected Portfolio Longevity (Age)"},
-        gauge = {
-            'axis': {'range': [st.session_state.ret_age, 100]},
-            'bar': {'color': "black", 'thickness': 0.25},
-            'steps': [
-                {'range': [st.session_state.ret_age, 75], 'color': "rgba(255, 99, 71, 0.8)"},   
-                {'range': [75, 85], 'color': "rgba(255, 165, 0, 0.8)"},      
-                {'range': [85, 95], 'color': "rgba(255, 235, 59, 0.8)"},     
-                {'range': [95, 100], 'color': "rgba(144, 238, 144, 0.8)"}    
-            ],
-        }
-    ))
-    
-    fig_gauge.update_layout(height=150, margin=dict(l=50, r=50, t=50, b=10))
-    st.plotly_chart(fig_gauge, use_container_width=True)
+
+    # ---- Plan Success Probability (Monte Carlo) ----
+    # Layperson-friendly headline: the chance the money lasts, plus how that confidence
+    # holds up at older ages. Computed with a fast bootstrap MC and cached in session_state
+    # so it doesn't recompute on every widget interaction; a button refreshes it.
+    st.subheader("Plan Success Probability")
+    dash_runs = 300
+
+    def _dashboard_success():
+        import numpy as _np
+        years = list(range(2026, 2090)); nN = len(years)
+        start = st.session_state.current_age
+        common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
+        uh = _np.array([SP500_BY_YEAR[y] for y in common]) / 100.0
+        eh = _np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common]) / 100.0
+        block = int(st.session_state.get('mc_block_len', 5)); nb = len(common) - block + 1
+        um = st.session_state.usd_market_return/100.0 + _np.var(uh)/2
+        em = st.session_state.eur_market_return/100.0 + _np.var(eh)/2
+        bmean = st.session_state.bond_mean/100.0
+        rng = _np.random.default_rng(2026)
+        ages = list(range(70, 101))
+        # For each path, record the age the portfolio depletes (or 101 if it survives).
+        depl_ages = []
+        for _ in range(dash_runs):
+            idx = []
+            while len(idx) < nN:
+                s = rng.integers(0, nb); idx.extend(range(s, s + block))
+            idx = _np.array(idx[:nN])
+            u = uh[idx]-uh[idx].mean()+um; e = eh[idx]-eh[idx].mean()+em
+            sc = {'returns': {years[i]: (float(u[i]), float(e[i])) for i in range(nN)},
+                  'bond': {years[i]: bmean for i in range(nN)}}
+            tot = run_core_simulation(scenario=sc)[0].loc['Total Portfolio Balance']
+            z = tot[tot <= 0]
+            depl_ages.append((z.index.min() - 2026 + start) if len(z) > 0 else 101)
+        depl_ages = _np.array(depl_ages)
+        overall = 100.0 * _np.mean(depl_ages >= 100)
+        by_age = [100.0 * _np.mean(depl_ages >= a) for a in ages]
+        return overall, ages, by_age
+
+    if st.button("Refresh Success Probability") or 'dash_success' not in st.session_state:
+        with st.spinner(f"Running {dash_runs} simulations..."):
+            st.session_state.dash_success = _dashboard_success()
+    overall_succ, succ_ages, succ_by_age = st.session_state.dash_success
+
+    # Color the headline by confidence band.
+    band = "#2ca02c" if overall_succ >= 85 else ("#ff9800" if overall_succ >= 70 else "#d62728")
+    g1, g2 = st.columns([1, 1.4])
+    with g1:
+        fig_gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=overall_succ,
+            number={'suffix': "%", 'font': {'size': 44}},
+            title={'text': "Chance Your Plan Succeeds<br><span style='font-size:0.8em;color:gray'>(money lasts to age 100)</span>"},
+            gauge={
+                'axis': {'range': [0, 100], 'ticksuffix': "%"},
+                'bar': {'color': band, 'thickness': 0.3},
+                'steps': [
+                    {'range': [0, 70], 'color': "rgba(214,39,40,0.18)"},
+                    {'range': [70, 85], 'color': "rgba(255,152,0,0.18)"},
+                    {'range': [85, 100], 'color': "rgba(44,160,44,0.18)"},
+                ],
+                'threshold': {'line': {'color': "black", 'width': 3}, 'thickness': 0.75, 'value': overall_succ}
+            }
+        ))
+        fig_gauge.update_layout(height=260, margin=dict(l=20, r=20, t=70, b=10))
+        st.plotly_chart(fig_gauge, use_container_width=True)
+    with g2:
+        fig_age = go.Figure(go.Scatter(
+            x=succ_ages, y=succ_by_age, mode='lines',
+            line=dict(color='#08519c', width=4), fill='tozeroy', fillcolor='rgba(8,81,156,0.12)',
+            hovertemplate="If you live to %{x}: %{y:.0f}% chance the money lasts<extra></extra>"
+        ))
+        fig_age.add_hline(y=85, line_dash="dot", line_color="#2ca02c", opacity=0.6,
+                          annotation_text="comfortable (85%)", annotation_position="bottom right")
+        fig_age.update_layout(
+            title="How confident, if you live longer?",
+            xaxis_title="Age", yaxis=dict(title="Chance money still lasts", range=[0, 101], ticksuffix="%"),
+            height=260, margin=dict(l=10, r=10, t=40, b=10)
+        )
+        st.plotly_chart(fig_age, use_container_width=True)
+
+    # Plain-language one-liner anyone can read.
+    verdict = ("on very solid ground" if overall_succ >= 85 else
+               "in reasonable shape, with some risk to watch" if overall_succ >= 70 else
+               "facing meaningful shortfall risk")
+    age90 = succ_by_age[succ_ages.index(90)] if 90 in succ_ages else overall_succ
+    st.markdown(
+        f"**In plain terms:** across {dash_runs} simulated futures, your plan funds your full lifestyle "
+        f"to age 100 about **{overall_succ:.0f}%** of the time \u2014 you're {verdict}. Even if you live to "
+        f"**90**, there's about a **{age90:.0f}%** chance the money is still there. Green is comfortable "
+        f"(85%+), amber is caution (70-85%), red is concern (below 70%)."
+    )
 
     st.subheader(f"Asset & Tax Lot Balances ({start_yr}-2089)")
     
@@ -1306,95 +1372,121 @@ elif selection == "5. The Great Reset Simulator":
 # -----------------------------------------------------------------------------
 elif selection == "6. Social Security & Pensions":
     st.header("6. Actuarial Social Security Engine")
-    st.sidebar.header("Earnings Assumptions")
-    st.session_state.mike_future_pct = st.sidebar.slider("Michael: Future % of Max Wage", 0, 100, st.session_state.mike_future_pct, 10)
-    st.session_state.steph_future_pct = st.sidebar.slider("Stephanie: Future % of Max Wage", 0, 100, st.session_state.steph_future_pct, 10)
+    st.markdown(
+        "Claim ages are **dynamically optimized** to maximize Monte Carlo joint-success (shown "
+        "below). Adjust the assumptions here, then hit **Re-Optimize** to re-solve the claim ages "
+        "against the new inputs. All figures show both nominal (future) and real 2026 dollars."
+    )
 
-    st.sidebar.header("Retirement Timing")
-    st.session_state.mike_ss_age = st.sidebar.slider("Michael Claim Age", 62, 70, st.session_state.mike_ss_age)
-    st.session_state.steph_ss_age = st.sidebar.slider("Stephanie Claim Age", 62, 70, st.session_state.steph_ss_age)
-    
-    st.sidebar.header("Actuarial Macros")
-    st.session_state.awi_rate = st.sidebar.number_input("Average Wage Index (AWI) %", value=st.session_state.awi_rate, step=0.1)
-    st.session_state.cola_rate = st.sidebar.number_input("Annual COLA (%)", value=st.session_state.cola_rate, step=0.1)
-    st.session_state.trust_fund_haircut = st.sidebar.slider("Trust Fund Haircut (%)", 0, 50, st.session_state.trust_fund_haircut, 5)
-
-    MIKE_SS, STEPH_SS = get_ss_timelines()
-    m_claim_yr = 2026 + (st.session_state.mike_ss_age - st.session_state.current_age)
-    s_claim_yr = 2026 + (st.session_state.steph_ss_age - st.session_state.current_age)
-    
-    # Calculate Real 2026 Dollars based on claim year and inflation rate
-    inf_rate = st.session_state.inflation_rate / 100.0
-    m_real_ss = MIKE_SS[m_claim_yr] / ((1 + inf_rate) ** (m_claim_yr - 2026))
-    s_real_ss = STEPH_SS[s_claim_yr] / ((1 + inf_rate) ** (s_claim_yr - 2026))
-    
-    c1, c2 = st.columns(2)
-    c1.success(f"**Michael (Starts {m_claim_yr})**\n\nNominal: **${MIKE_SS[m_claim_yr]:,.0f}** / yr\n\nReal (2026 $): **${m_real_ss:,.0f}** / yr")
-    c2.success(f"**Stephanie (Starts {s_claim_yr})**\n\nNominal: **${STEPH_SS[s_claim_yr]:,.0f}** / yr\n\nReal (2026 $): **${s_real_ss:,.0f}** / yr")
+    st.subheader("Earnings, COLA & Funding Assumptions")
+    e1, e2, e3 = st.columns(3)
+    st.session_state.mike_future_pct = e1.slider("Michael: Future % of Max Taxable Earnings", 0, 100, st.session_state.mike_future_pct, 5,
+                                                 help="Share of the SS maximum taxable wage base you earn in the years until retirement. 100% = always at the cap.")
+    st.session_state.steph_future_pct = e2.slider("Stephanie: Future % of Max Taxable Earnings", 0, 100, st.session_state.steph_future_pct, 5)
+    st.session_state.awi_rate = e3.number_input("Average Wage Index growth (%)", value=st.session_state.awi_rate, step=0.1,
+                                                help="National wage growth that indexes the bend points and your earnings history.")
+    f1, f2, f3 = st.columns(3)
+    st.session_state.cola_rate = f1.number_input("Annual COLA (%)", value=st.session_state.cola_rate, step=0.1,
+                                                 help="Cost-of-living adjustment applied to benefits each year.")
+    st.session_state.trust_fund_haircut = f2.slider("SS Funding Shortfall Haircut (%)", 0, 50, st.session_state.trust_fund_haircut, 5,
+                                                    help="Permanent benefit reduction from the trust-fund shortfall. The Trustees project ~20-23% if Congress does nothing by ~2033.")
+    st.session_state.inflation_rate = f3.number_input("Inflation for Real $ Conversion (%)", value=st.session_state.inflation_rate, step=0.1,
+                                                      help="Used to convert future nominal benefits into today's 2026 purchasing power.")
 
     st.markdown("---")
-    st.subheader("Dynamic Claim-Age Optimization")
-    st.markdown(
-        "Instead of fixing claim ages by hand, solve for the ages that **maximize Monte Carlo "
-        "joint-success** (never deplete + full lifestyle + hit gift goal). The optimizer searches "
-        "each spouse's age 62-70 via coordinate descent (optimize one holding the other fixed, "
-        "then swap, iterating until stable) using the same valuation-conditioned, crisis-prone "
-        "engine as the main simulation. The winning ages are written into the model and used "
-        "**everywhere** \u2014 base case, cash flow, and all simulation runs."
-    )
-    if st.session_state.get('ss_ages_optimized', False):
-        st.info(f"Current claim ages were set by the optimizer: Michael **{st.session_state.mike_ss_age}**, Stephanie **{st.session_state.steph_ss_age}**. You can still override them with the sidebar sliders.")
-    opt_runs_ss = st.number_input("Paths per claim-age evaluation", value=150, min_value=50, max_value=500, step=50, key="ss_opt_runs")
+    st.subheader("Optimized Claim Ages")
+    oc1, oc2, oc3 = st.columns([1, 1, 1])
+    # Manual override sliders (kept available; editing them turns off the 'optimized' flag).
+    new_m = oc1.slider("Michael Claim Age", 62, 70, int(st.session_state.mike_ss_age))
+    new_s = oc2.slider("Stephanie Claim Age", 62, 70, int(st.session_state.steph_ss_age))
+    if new_m != st.session_state.mike_ss_age or new_s != st.session_state.steph_ss_age:
+        st.session_state.mike_ss_age = new_m; st.session_state.steph_ss_age = new_s
+        st.session_state.ss_ages_optimized = False
+    opt_runs_ss = oc3.number_input("Paths per evaluation", value=150, min_value=50, max_value=500, step=50, key="ss_opt_runs")
 
-    if st.button("Optimize Claim Ages"):
+    reopt = st.button("Re-Optimize Claim Ages", type="primary")
+    if reopt:
         ages = list(range(62, 71))
         seed = int(st.session_state.get('mc_seed', 42))
         n_ev = int(opt_runs_ss)
-        # Start from current ages; coordinate descent for 2 rounds.
         m_cur = int(st.session_state.mike_ss_age); s_cur = int(st.session_state.steph_ss_age)
         history = []
-        prog = st.progress(0.0, text="Optimizing claim ages...")
-        total_steps = 4 * len(ages)  # 2 rounds x 2 spouses x 9 ages
-        done = 0
+        prog = st.progress(0.0, text="Re-optimizing claim ages against current assumptions...")
+        total_steps = 4 * len(ages); done = 0
         for rnd in range(2):
-            # Optimize Michael holding Stephanie fixed.
             best_m, best_score = m_cur, -1.0
             for a in ages:
                 sc = score_joint_success_for_ss(n_ev, seed, a, s_cur)
                 if sc > best_score: best_score, best_m = sc, a
-                done += 1; prog.progress(done/total_steps, text=f"Round {rnd+1}: Michael age {a} -> {sc:.0f}%")
+                done += 1; prog.progress(done/total_steps, text=f"Round {rnd+1}: Michael age {a} \u2192 {sc:.0f}%")
             m_cur = best_m
-            # Optimize Stephanie holding Michael fixed.
             best_s, best_score = s_cur, -1.0
             for a in ages:
                 sc = score_joint_success_for_ss(n_ev, seed, m_cur, a)
                 if sc > best_score: best_score, best_s = sc, a
-                done += 1; prog.progress(done/total_steps, text=f"Round {rnd+1}: Stephanie age {a} -> {sc:.0f}%")
+                done += 1; prog.progress(done/total_steps, text=f"Round {rnd+1}: Stephanie age {a} \u2192 {sc:.0f}%")
             s_cur = best_s
             history.append((rnd+1, m_cur, s_cur, best_score))
         prog.progress(1.0, text="Complete.")
-
-        # Write the optimized ages into the model (used everywhere via get_ss_timelines).
-        st.session_state.mike_ss_age = int(m_cur)
-        st.session_state.steph_ss_age = int(s_cur)
+        st.session_state.mike_ss_age = int(m_cur); st.session_state.steph_ss_age = int(s_cur)
         st.session_state.ss_ages_optimized = True
+        st.success(f"**Re-optimized:** Michael claims at **{m_cur}**, Stephanie at **{s_cur}** \u2014 joint-success **{history[-1][3]:.1f}%**. Applied across the entire model.")
 
-        final_score = history[-1][3]
-        st.success(
-            f"**Optimal claim ages:** Michael **{m_cur}**, Stephanie **{s_cur}** \u2014 "
-            f"joint-success **{final_score:.1f}%**. These are now applied across the entire model. "
-            "Re-run any simulation (Monte Carlo, tornado, etc.) to see them reflected."
-        )
-        if history[0][1:3] != history[1][1:3]:
-            st.caption(f"Coordinate descent moved between rounds (round 1: {history[0][1]}/{history[0][2]} \u2192 round 2: {history[1][1]}/{history[1][2]}), confirming the two ages interact through the survivor/joint objective.")
-        else:
-            st.caption("Coordinate descent converged after one round (the two ages don't strongly interact at these inputs).")
-        st.caption(
-            "Optimized once on the conditioned base case (no look-ahead bias), then held fixed across "
-            "all paths. Scored on joint-success with common random numbers so age choices are compared "
-            "on identical simulated markets. Not tax/financial advice \u2014 the survivor-benefit interaction "
-            "especially warrants a specialist's review."
-        )
+    if st.session_state.get('ss_ages_optimized', False):
+        st.caption(f"Claim ages are optimizer-set (Michael {st.session_state.mike_ss_age}, Stephanie {st.session_state.steph_ss_age}). Editing a slider above switches to manual mode; Re-Optimize restores the solved ages.")
+    else:
+        st.caption("Claim ages are currently **manual**. Hit Re-Optimize to solve for the joint-success-maximizing ages under the assumptions above.")
+
+    # Recompute timelines with current inputs and ages.
+    MIKE_SS, STEPH_SS = get_ss_timelines()
+    m_claim_yr = 2026 + (st.session_state.mike_ss_age - st.session_state.current_age)
+    s_claim_yr = 2026 + (st.session_state.steph_ss_age - st.session_state.current_age)
+    inf_rate = st.session_state.inflation_rate / 100.0
+    m_real_ss = MIKE_SS[m_claim_yr] / ((1 + inf_rate) ** (m_claim_yr - 2026))
+    s_real_ss = STEPH_SS[s_claim_yr] / ((1 + inf_rate) ** (s_claim_yr - 2026))
+
+    st.markdown("---")
+    st.subheader("Benefit at Claim")
+    c1, c2 = st.columns(2)
+    c1.success(f"**Michael \u2014 claims {m_claim_yr} (age {st.session_state.mike_ss_age})**\n\nNominal: **${MIKE_SS[m_claim_yr]:,.0f}**/yr\n\nReal (2026 $): **${m_real_ss:,.0f}**/yr")
+    c2.success(f"**Stephanie \u2014 claims {s_claim_yr} (age {st.session_state.steph_ss_age})**\n\nNominal: **${STEPH_SS[s_claim_yr]:,.0f}**/yr\n\nReal (2026 $): **${s_real_ss:,.0f}**/yr")
+
+    # Combined household benefit over time, nominal vs real 2026 $.
+    all_yrs = sorted(set(MIKE_SS) | set(STEPH_SS))
+    rows = []
+    for y in all_yrs:
+        m_nom = MIKE_SS.get(y, 0); s_nom = STEPH_SS.get(y, 0); tot_nom = m_nom + s_nom
+        defl = (1 + inf_rate) ** (y - 2026)
+        rows.append({"Year": y, "Age (M)": st.session_state.current_age + (y - 2026),
+                     "Michael (nom)": m_nom, "Stephanie (nom)": s_nom,
+                     "Household (nom)": tot_nom, "Household (real 2026 $)": tot_nom / defl})
+    df_ss = pd.DataFrame(rows)
+    df_ss = df_ss[df_ss["Household (nom)"] > 0]
+
+    st.markdown("---")
+    st.subheader("Household Benefit Over Time \u2014 Real (2026 $) vs Nominal")
+    if not df_ss.empty:
+        fig_ss = go.Figure()
+        fig_ss.add_trace(go.Scatter(x=df_ss["Year"], y=df_ss["Household (nom)"], mode='lines',
+                                    name="Nominal (future $)", line=dict(color='#9ecae1', width=2)))
+        fig_ss.add_trace(go.Scatter(x=df_ss["Year"], y=df_ss["Household (real 2026 $)"], mode='lines',
+                                    name="Real (2026 $)", line=dict(color='#08519c', width=3)))
+        fig_ss.update_layout(height=360, yaxis_title="Household SS ($/yr)", xaxis_title="Year",
+                             legend=dict(orientation='h', y=1.12), margin=dict(l=10, r=10, t=30, b=10))
+        st.plotly_chart(fig_ss, use_container_width=True)
+        st.caption("Nominal benefits grow with COLA; the real line shows constant 2026 purchasing power (COLA net of inflation). If COLA < inflation, the real line drifts down over time.")
+
+        show = df_ss[df_ss["Year"].isin([y for y in df_ss["Year"] if (y - 2026) % 5 == 0 or y in (m_claim_yr, s_claim_yr)])].copy()
+        st.dataframe(
+            show.style.format({"Michael (nom)": "${:,.0f}", "Stephanie (nom)": "${:,.0f}",
+                               "Household (nom)": "${:,.0f}", "Household (real 2026 $)": "${:,.0f}"}),
+            use_container_width=True, hide_index=True)
+    st.caption(
+        "Optimization scores joint-success (never deplete + full lifestyle + hit gift goal) with common "
+        "random numbers on the valuation-conditioned, crisis-prone engine. The funding-shortfall haircut "
+        "permanently scales benefits down. Not tax/financial advice \u2014 the survivor-benefit interaction "
+        "(the higher earner's delay protects the survivor) especially warrants a specialist's review."
+    )
 
 # -----------------------------------------------------------------------------
 # 7. CASH FLOW & SLOVENIAN DRIP
@@ -2795,4 +2887,141 @@ elif selection == "13. Roth Conversion Ladder Optimizer":
             "level) so the comparison reflects the strategy, not Monte Carlo noise. Scored on joint-success "
             "(never deplete + full lifestyle + hit gift goal). Not tax advice \u2014 cross-border Roth treatment "
             "is genuinely uncertain and warrants a US-expat tax specialist before acting."
+        )
+
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 14. SENSITIVITY DECOMPOSITION (FACTOR SWING)
+# -----------------------------------------------------------------------------
+elif selection == "14. Variance Decomposition (Sobol)":
+    st.header("14. Sensitivity Decomposition (Factor Swing on Terminal Wealth)")
+    st.markdown(
+        "How much does each structural assumption move your **terminal real wealth**? For each "
+        "factor, the model sweeps it across a plausible range while holding the others at their "
+        "median, and reports the resulting swing in age-100 wealth (2026 dollars). This is the "
+        "robust, interpretable cousin of a formal variance decomposition: it ranks the factors "
+        "by how much they actually move your outcome, without the estimator noise that a Sobol "
+        "decomposition suffers when returns compound so multiplicatively over 60+ years that "
+        "almost all variance becomes interaction variance."
+    )
+    st.info(
+        "Each point is one deterministic 64-year simulation with the swept factor fixed at a "
+        "quantile of its range and all others at median \u2014 so this isolates structural sensitivity, "
+        "not Monte Carlo noise. The full Monte Carlo (Page 12) still captures year-by-year sequence "
+        "risk and the joint interactions; this view is about *which lever matters most*."
+    )
+
+    sweep_pts = st.number_input("Points per factor sweep", value=7, min_value=3, max_value=15, step=2)
+
+    if st.button("Run Sensitivity Decomposition"):
+        from scipy.stats import norm
+        years = list(range(2026, 2090)); nN = len(years)
+        start = st.session_state.current_age
+        common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
+        uh = np.array([SP500_BY_YEAR[y] for y in common]) / 100.0
+        eh = np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common]) / 100.0
+        usd_mu = st.session_state.usd_market_return/100.0; usd_sd = uh.std()
+        eur_mu = st.session_state.eur_market_return/100.0; eur_sd = eh.std()
+        bond_mu = st.session_state.bond_mean/100.0
+        SM, SF = SURV_MALE, SURV_FEMALE; woff = st.session_state.mc_wife_age_offset
+
+        FAC = ["Equity Returns", "Inflation", "FX Rate", "Longevity", "LTC Shock", "Tax Regime"]
+        k = len(FAC)
+
+        def death_from_u(u, table, cur):
+            cum = 1.0; target = 1 - u
+            for a in range(cur, max(table)+1):
+                cum *= table.get(a, 1.0 if a < _MIN_LIFE_AGE else 0.0)
+                if cum <= target: return a
+            return max(table)
+
+        def evaluate(row):
+            u_eq, u_inf, u_fx, u_lon, u_ltc, u_tax = row
+            z_eq = norm.ppf(min(max(u_eq, 1e-4), 1 - 1e-4))
+            # Sustained 64-year AVERAGE return disperses far less than a single year. Map the
+            # quantile to roughly +/-3% around the mean (a wide but plausible realized-average
+            # band) so the dollar swing is meaningful, not an absurd single-year extrapolation.
+            eq_shift = np.clip(z_eq, -2.5, 2.5) * 0.012
+            sc = {'returns': {y: (usd_mu+eq_shift, eur_mu+eq_shift*(eur_sd/usd_sd)) for y in years},
+                  'bond': {y: bond_mu for y in years}}
+            infl = 0.01 + 0.05 * u_inf
+            sc['inflation'] = {y: infl for y in years}
+            sc['fx'] = {y: st.session_state.fx_rate * (0.85 + 0.40 * u_fx) for y in years}
+            d_self = death_from_u(u_lon, SM, start); d_sp = death_from_u(u_lon, SF, start - woff)
+            sy = 2026 + (d_self - start); py = 2026 + (d_sp - (start - woff))
+            sc['death_year'] = min(2089, max(sy, py)); sc['_first_death_yr'] = min(sy, py)
+            if u_ltc < st.session_state.mc_ltc_prob:
+                onset = 2026 + (82 - start); ltc = {}
+                for j in range(int(st.session_state.mc_ltc_years)):
+                    if onset+j <= 2089: ltc[onset+j] = st.session_state.mc_ltc_cost
+                sc['ltc_cost'] = ltc
+            sc['tax_mult'] = 0.8 + 0.5 * u_tax
+            db, _, _, _, _ = run_core_simulation(scenario=sc)
+            tot = db.loc['Total Portfolio Balance']
+            return tot[2089] / ((1+infl)**(2089-2026))
+
+        P = int(sweep_pts); qs = np.linspace(0.05, 0.95, P)
+        med = [0.5]*k
+        base_wealth = evaluate(med)
+        prog = st.progress(0.0, text="Sweeping factors...")
+        swings = []; curves = {}
+        for j in range(k):
+            vals = []
+            for q in qs:
+                row = med.copy(); row[j] = q
+                vals.append(evaluate(row))
+            vals = np.array(vals)
+            curves[FAC[j]] = (qs.copy(), vals.copy())
+            swings.append((FAC[j], vals.max() - vals.min(), vals.min(), vals.max()))
+            prog.progress((j+1)/k, text=f"{FAC[j]} done")
+        prog.progress(1.0, text="Complete.")
+
+        swings.sort(key=lambda r: r[1], reverse=True)
+        labels = [s[0] for s in swings]; mags = [s[1]/1e6 for s in swings]
+        total = sum(mags) or 1.0
+        fig = go.Figure(go.Bar(
+            y=labels, x=mags, orientation='h',
+            marker_color='#2166ac',
+            text=[f"${m:,.1f}M  ({m/total:.0%})" for m in mags], textposition='outside'
+        ))
+        fig.update_layout(
+            title="Terminal Real Wealth Swing by Factor (range sweep, others at median)",
+            xaxis_title="Swing in age-100 real wealth ($M, 2026 $)",
+            height=400, yaxis=dict(autorange='reversed'), margin=dict(l=10, r=80, t=50, b=10)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        df_sw = pd.DataFrame({
+            "Factor": [s[0] for s in swings],
+            "Low end": [f"${s[2]/1e6:,.1f}M" for s in swings],
+            "High end": [f"${s[3]/1e6:,.1f}M" for s in swings],
+            "Swing": [f"${s[1]/1e6:,.1f}M" for s in swings],
+            "Share of total swing": [f"{(s[1]/1e6)/total:.0%}" for s in swings],
+        }).set_index("Factor")
+        st.dataframe(df_sw, use_container_width=True)
+
+        top = swings[0]
+        st.metric("Median-case terminal real wealth", f"${base_wealth/1e6:,.2f}M")
+        st.success(
+            f"**{top[0]}** is the dominant lever \u2014 sweeping it across its plausible range moves your "
+            f"age-100 real wealth by **${top[1]/1e6:,.1f}M** ({(top[1]/1e6)/total:.0%} of the total factor "
+            f"swing), from ${top[2]/1e6:,.1f}M to ${top[3]/1e6:,.1f}M. Concentrate planning attention and "
+            f"hedges on the highest-swing factors; the bottom of the list barely moves your outcome and "
+            f"isn't worth optimizing."
+        )
+
+        # Detail: show the response curve for the top factor.
+        tq, tv = curves[swings[0][0]]
+        figc = go.Figure(go.Scatter(x=tq, y=tv/1e6, mode='lines+markers', line=dict(color='#b2182b', width=3)))
+        figc.update_layout(
+            title=f"Response curve: {swings[0][0]} (others at median)",
+            xaxis_title="Factor quantile (low \u2192 high)", yaxis_title="Terminal real wealth ($M)",
+            height=320, margin=dict(l=10, r=10, t=50, b=10)
+        )
+        st.plotly_chart(figc, use_container_width=True)
+        st.caption(
+            "Factor ranges: equity \u00b1~3% on the sustained average annual return; inflation 1-6%; FX 0.85-1.25x base; "
+            "tax 0.8-1.3x; longevity via SSA survival tables; LTC at your stated probability/cost. This is a "
+            "one-at-a-time structural sensitivity (others held at median), so it ranks lever importance but "
+            "does not itself quantify interactions \u2014 the Page 12 interaction matrix covers those. Not advice."
         )
