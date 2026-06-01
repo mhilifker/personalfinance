@@ -836,7 +836,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         base_gift_usd = 0
         if st.session_state.gift_start_age <= age <= st.session_state.gift_end_age:
             plan_return = st.session_state.usd_market_return / 100.0
-            n_total = 100 - age
+            n_total = 83 - age
             approx_annual_draw = max(0, target_lifestyle_usd - net_ss_usd)
             
             if plan_return == i_rate:
@@ -854,7 +854,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
             n_rem_gifts = st.session_state.gift_end_age - age + 1
             if n_rem_gifts > 0 and plan_return > 0:
                 fvifa = (((1+plan_return)**n_rem_gifts) - 1) / plan_return
-                growth_after_gifts = (1+plan_return)**(100 - st.session_state.gift_end_age)
+                growth_after_gifts = (1+plan_return)**(83 - st.session_state.gift_end_age)
                 base_gift_usd = remaining_gift_fv_needed / (fvifa * growth_after_gifts)
                 
         # 3. Guardrails Logic
@@ -1959,7 +1959,7 @@ elif selection == "11. Longevity Optimizer (Guardrails)":
     
     st.markdown("---")
     st.subheader("3. Dynamic Gifting Calibration")
-    st.markdown("Every year, the engine projects what your Terminal Portfolio Value at Age 100 *would be* if you stopped gifting today. It targets gifting a total equivalent to your chosen percentage of that terminal value.")
+    st.markdown("Every year, the engine projects what your Terminal Portfolio Value at Age 83 *would be* if you stopped gifting today. It targets gifting a total equivalent to your chosen percentage of that terminal value.")
     st.session_state.dynamic_gift_pct = st.number_input("Target Lifetime Gift Value (% of Projected Terminal Portfolio)", value=st.session_state.dynamic_gift_pct, step=5.0)
     st.session_state.gift_start_age = st.number_input("Age to Start Gifting", value=st.session_state.gift_start_age, step=1)
     st.session_state.gift_end_age = st.number_input("Age to End Gifting", value=st.session_state.gift_end_age, step=1)
