@@ -354,7 +354,11 @@ def dashboard_full_stress_metrics(n_runs, seed):
     path_success = []       # solvent through death
     full_life = []          # also funded >=95% lifestyle
     funded_ratios = []      # achieved real lifestyle / target, per path (for distribution)
-    for _ in range(n_runs):
+    # Per-year achieved real (2026 $) lifestyle spend, one row per path. NaN after death so
+    # the by-year median reflects only living-household years, not post-death zero spend.
+    ret_years_all = [y for y in years if y >= ret_start]
+    spend_matrix = _np.full((n_runs, len(ret_years_all)), _np.nan)
+    for _run in range(n_runs):
         idx = []
         while len(idx) < nN:
             s = rng.integers(0, nb); idx.extend(range(s, s + block))
@@ -423,6 +427,10 @@ def dashboard_full_stress_metrics(n_runs, seed):
         ar = sum(life.get(y,0)/dm[y] for y in scored)
         ratio = ar / stgt
         funded_ratios.append(ratio)
+        # Record per-year achieved real spend (living years only; NaN after death).
+        for ci, y in enumerate(ret_years_all):
+            if y <= death_yr:
+                spend_matrix[_run, ci] = life.get(y, 0.0) / dm[y]
         full_life.append(path_success[-1] and ratio >= 0.95)
 
     path_success = _np.array(path_success); full_life = _np.array(full_life)
@@ -442,11 +450,23 @@ def dashboard_full_stress_metrics(n_runs, seed):
     # the tail noisy because few paths reach 100.)
     ages = list(range(70, 101))
     by_age = [100.0 * _np.mean(depl >= a) for a in ages]
+    # By-year achieved real lifestyle spend: median and 25-75 band across paths (living years).
+    with _np.errstate(all='ignore'):
+        spend_median = _np.nanmedian(spend_matrix, axis=0)
+        spend_p25 = _np.nanpercentile(spend_matrix, 25, axis=0)
+        spend_p75 = _np.nanpercentile(spend_matrix, 75, axis=0)
+    spend_target = [target_real_map[y] for y in ret_years_all]
     return {
         'never_deplete': never_deplete, 'full_lifestyle': full_lifestyle,
         'band_full': band_full, 'band_mid': band_mid, 'band_low': band_low,
         'median_funded': median_funded, 'ages': ages, 'by_age': by_age,
-        'funded_ratios': (fr * 100.0).tolist()  # per-path % of target lifestyle funded
+        'funded_ratios': (fr * 100.0).tolist(),
+        'spend_years': ret_years_all,
+        'spend_median': [None if _np.isnan(v) else float(v) for v in spend_median],
+        'spend_p25': [None if _np.isnan(v) else float(v) for v in spend_p25],
+        'spend_p75': [None if _np.isnan(v) else float(v) for v in spend_p75],
+        'spend_target': spend_target,
+        'start_age': start,
     }
 
 
@@ -1206,6 +1226,53 @@ if selection == "1. Executive Dashboard":
         height=300, margin=dict(l=10, r=10, t=50, b=10)
     )
     st.plotly_chart(fig_age, use_container_width=True)
+
+    # ---- Lifestyle spend: median achieved vs target, by year (real 2026 $) ----
+    sp_years = R.get('spend_years', [])
+    sp_med = R.get('spend_median', [])
+    sp_tgt = R.get('spend_target', [])
+    sp_lo = R.get('spend_p25', []); sp_hi = R.get('spend_p75', [])
+    sa = R.get('start_age', st.session_state.current_age)
+    if sp_years:
+        # Trim trailing years where everyone has died (median is None).
+        valid = [i for i, v in enumerate(sp_med) if v is not None]
+        if valid:
+            lo_i, hi_i = valid[0], valid[-1] + 1
+            yy = sp_years[lo_i:hi_i]
+            med = sp_med[lo_i:hi_i]; tgt = sp_tgt[lo_i:hi_i]
+            p25 = sp_lo[lo_i:hi_i]; p75 = sp_hi[lo_i:hi_i]
+            fig_sp = go.Figure()
+            # 25-75 band (only where defined).
+            band_x = [y for y, a, b in zip(yy, p25, p75) if a is not None and b is not None]
+            band_lo = [a for a in p25 if a is not None]; band_hi = [b for b in p75 if b is not None]
+            if band_x:
+                fig_sp.add_trace(go.Scatter(x=band_x + band_x[::-1], y=band_hi + band_lo[::-1],
+                                            fill='toself', fillcolor='rgba(8,81,156,0.10)',
+                                            line=dict(color='rgba(0,0,0,0)'), hoverinfo='skip',
+                                            name='25th-75th percentile', showlegend=True))
+            fig_sp.add_trace(go.Scatter(x=yy, y=tgt, mode='lines', name='Target lifestyle',
+                                        line=dict(color='#d62728', width=2, dash='dash'),
+                                        hovertemplate="%{x}: target $%{y:,.0f}<extra></extra>"))
+            fig_sp.add_trace(go.Scatter(x=yy, y=med, mode='lines', name='Typical (median) achieved',
+                                        line=dict(color='#08519c', width=4),
+                                        hovertemplate="%{x}: median $%{y:,.0f}<extra></extra>"))
+            fig_sp.update_layout(
+                title="Lifestyle spend: typical achieved vs target (real 2026 $)",
+                xaxis_title="Year", yaxis=dict(title="Annual spend (2026 $)", tickprefix="$"),
+                height=320, legend=dict(orientation='h', y=1.14), margin=dict(l=10, r=10, t=60, b=10)
+            )
+            st.plotly_chart(fig_sp, use_container_width=True)
+            # Plain-language gap summary.
+            med_arr = np.array([m for m in med if m is not None])
+            tgt_arr = np.array([t for t, m in zip(tgt, med) if m is not None])
+            avg_gap = 100.0 * (1 - np.mean(med_arr) / np.mean(tgt_arr)) if np.mean(tgt_arr) > 0 else 0
+            st.caption(
+                f"The blue line is what you'd *typically* get to spend each year (median across {dash_runs} "
+                f"stress-tested futures), in today's dollars; the dashed red line is your target. The shaded "
+                f"band is the 25th-75th percentile range. On average the typical path runs about "
+                f"**{avg_gap:.0f}% below target** \u2014 the gap reflects guardrail trims in weaker-market years. "
+                "Both are post-tax, real (inflation-adjusted) figures, scored only while the household is living."
+            )
 
     verdict = ("on very solid ground" if never_succ >= 85 else
                "in reasonable shape, with real risk to watch" if never_succ >= 70 else
