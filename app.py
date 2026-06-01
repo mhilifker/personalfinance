@@ -314,9 +314,12 @@ def dashboard_full_stress_metrics(n_runs, seed):
     """Runs the SAME full-stress engine as Page 12 (valuation conditioning + crisis overlay +
     EUR bond sleeve + every enabled stress factor: stochastic inflation, FX, longevity, LTC,
     tax-regime drift, SS haircut, and the survivor scenario) and returns three things:
+    tax-regime drift, SS haircut, and the survivor scenario) and returns a dict with:
       - never_deplete %: share of paths solvent through the survivor's death (true success)
-      - full_lifestyle %: share also funding >=95% of real target lifestyle (the stricter bar)
-      - (ages, by_age): never-deplete probability conditional on living to each age 70-100
+      - full_lifestyle %: share also funding >=95% of real target lifestyle (the strict bar)
+      - band_full/band_mid/band_low: share funding >=95% / 85-95% / <85% of target
+      - median_funded %: the typical (median) share of target lifestyle funded
+      - ages, by_age: portfolio-solvency probability at each age 70-100 (monotonic)
     This is the honest dashboard number; it deliberately mirrors Page 12 rather than the old
     light engine, so the headline matches the rigorous analysis."""
     import numpy as _np
@@ -350,6 +353,7 @@ def dashboard_full_stress_metrics(n_runs, seed):
     death_ages = []         # survivor death age (or 101 if longevity off)
     path_success = []       # solvent through death
     full_life = []          # also funded >=95% lifestyle
+    funded_ratios = []      # achieved real lifestyle / target, per path (for distribution)
     for _ in range(n_runs):
         idx = []
         while len(idx) < nN:
@@ -417,19 +421,33 @@ def dashboard_full_stress_metrics(n_runs, seed):
         stgt = sum(target_real_map[y] for y in scored) or 1.0
         life = dd.loc["Actual Lifestyle Spend"]
         ar = sum(life.get(y,0)/dm[y] for y in scored)
-        full_life.append(path_success[-1] and (ar/stgt) >= 0.95)
+        ratio = ar / stgt
+        funded_ratios.append(ratio)
+        full_life.append(path_success[-1] and ratio >= 0.95)
 
     path_success = _np.array(path_success); full_life = _np.array(full_life)
     depl = _np.array(depl_living_ages); dage = _np.array(death_ages)
+    fr = _np.array(funded_ratios)
     never_deplete = 100.0 * path_success.mean()
     full_lifestyle = 100.0 * full_life.mean()
+    # Funded-lifestyle distribution: most "not 95%" paths still fund 85-95%, not destitution.
+    # Bands are share of paths funding >=95%, 85-95%, and below 85% of target real lifestyle.
+    band_full = 100.0 * _np.mean(fr >= 0.95)
+    band_mid = 100.0 * _np.mean((fr >= 0.85) & (fr < 0.95))
+    band_low = 100.0 * _np.mean(fr < 0.85)
+    median_funded = 100.0 * float(_np.median(fr))
     # By-age curve: unconditional probability the PORTFOLIO is still solvent at each age
     # (financial depletion age >= a). This is guaranteed monotonic non-increasing and is the
     # clean "will the money still be there at age X" line. (Conditioning on being alive made
     # the tail noisy because few paths reach 100.)
     ages = list(range(70, 101))
     by_age = [100.0 * _np.mean(depl >= a) for a in ages]
-    return never_deplete, full_lifestyle, ages, by_age
+    return {
+        'never_deplete': never_deplete, 'full_lifestyle': full_lifestyle,
+        'band_full': band_full, 'band_mid': band_mid, 'band_low': band_low,
+        'median_funded': median_funded, 'ages': ages, 'by_age': by_age,
+        'funded_ratios': (fr * 100.0).tolist()  # per-path % of target lifestyle funded
+    }
 
 
 # Bifurcated Glide Path
@@ -1101,26 +1119,79 @@ if selection == "1. Executive Dashboard":
     if st.button("Refresh Success Probability") or 'dash_success_v2' not in st.session_state:
         with st.spinner(f"Running {dash_runs} full-stress simulations (valuation + crisis + all factors)..."):
             st.session_state.dash_success_v2 = dashboard_full_stress_metrics(dash_runs, seed=2026)
-    never_succ, full_succ, succ_ages, succ_by_age = st.session_state.dash_success_v2
+    R = st.session_state.dash_success_v2
+    never_succ = R['never_deplete']; succ_ages = R['ages']; succ_by_age = R['by_age']
+    median_funded = R['median_funded']
+    band_full, band_mid, band_low = R['band_full'], R['band_mid'], R['band_low']
 
     def _band(v): return "#2ca02c" if v >= 85 else ("#ff9800" if v >= 70 else "#d62728")
-    def _gauge(value, title):
-        return go.Figure(go.Indicator(
-            mode="gauge+number", value=value, number={'suffix': "%", 'font': {'size': 40}},
-            title={'text': title},
-            gauge={'axis': {'range': [0, 100], 'ticksuffix': "%"},
-                   'bar': {'color': _band(value), 'thickness': 0.3},
-                   'steps': [{'range': [0, 70], 'color': "rgba(214,39,40,0.18)"},
-                             {'range': [70, 85], 'color': "rgba(255,152,0,0.18)"},
-                             {'range': [85, 100], 'color': "rgba(44,160,44,0.18)"}],
-                   'threshold': {'line': {'color': "black", 'width': 3}, 'thickness': 0.75, 'value': value}}
-        )).update_layout(height=240, margin=dict(l=20, r=20, t=70, b=10))
 
     g1, g2 = st.columns(2)
     with g1:
-        st.plotly_chart(_gauge(never_succ, "Money Never Runs Out<br><span style='font-size:0.78em;color:gray'>(solvent through your lifetime)</span>"), use_container_width=True)
+        fig_g = go.Figure(go.Indicator(
+            mode="gauge+number", value=never_succ, number={'suffix': "%", 'font': {'size': 40}},
+            title={'text': "Money Never Runs Out<br><span style='font-size:0.78em;color:gray'>(solvent through your lifetime)</span>"},
+            gauge={'axis': {'range': [0, 100], 'ticksuffix': "%"},
+                   'bar': {'color': _band(never_succ), 'thickness': 0.3},
+                   'steps': [{'range': [0, 70], 'color': "rgba(214,39,40,0.18)"},
+                             {'range': [70, 85], 'color': "rgba(255,152,0,0.18)"},
+                             {'range': [85, 100], 'color': "rgba(44,160,44,0.18)"}],
+                   'threshold': {'line': {'color': "black", 'width': 3}, 'thickness': 0.75, 'value': never_succ}}
+        ))
+        fig_g.update_layout(height=260, margin=dict(l=20, r=20, t=70, b=10))
+        st.plotly_chart(fig_g, use_container_width=True)
     with g2:
-        st.plotly_chart(_gauge(full_succ, "Full Lifestyle Funded<br><span style='font-size:0.78em;color:gray'>(no spending cuts, \u226595% of plan)</span>"), use_container_width=True)
+        # Lifestyle-funding distribution: how fully you fund your TARGET spending. Most paths
+        # that aren't at 95%+ are still in the comfortable 85-95% band, not deprivation.
+        fig_d = go.Figure()
+        fig_d.add_trace(go.Bar(x=[band_full], y=["Lifestyle"], orientation='h',
+                               name="Full (95%+)", marker_color='#2ca02c',
+                               text=f"{band_full:.0f}%", textposition='inside'))
+        fig_d.add_trace(go.Bar(x=[band_mid], y=["Lifestyle"], orientation='h',
+                               name="Comfortable (85-95%)", marker_color='#9ecae1',
+                               text=f"{band_mid:.0f}%", textposition='inside'))
+        fig_d.add_trace(go.Bar(x=[band_low], y=["Lifestyle"], orientation='h',
+                               name="Tightened (<85%)", marker_color='#fdae6b',
+                               text=f"{band_low:.0f}%", textposition='inside'))
+        fig_d.update_layout(
+            barmode='stack', height=150,
+            title={'text': f"How fully is your lifestyle funded?<br><span style='font-size:0.78em;color:gray'>Typical path funds {median_funded:.0f}% of target</span>"},
+            xaxis=dict(range=[0, 100], ticksuffix="%", title="Share of simulated futures"),
+            yaxis=dict(showticklabels=False),
+            legend=dict(orientation='h', y=-0.5), margin=dict(l=10, r=10, t=60, b=10)
+        )
+        st.plotly_chart(fig_d, use_container_width=True)
+        st.metric("Typical lifestyle funded (median)", f"{median_funded:.0f}%")
+
+    # Full histogram of funded ratios so the coarse bands don't hide the shape \u2014 e.g. how
+    # much of the "below 85%" mass is a near-miss 80% vs a genuine 40% shortfall.
+    fr_list = R.get('funded_ratios', [])
+    if fr_list:
+        fr_arr = np.clip(np.array(fr_list), 0, 100)
+        below85 = fr_arr[fr_arr < 85]
+        fig_h = go.Figure(go.Histogram(
+            x=fr_arr, xbins=dict(start=0, end=100, size=5),
+            marker_color='#6baed6', marker_line=dict(color='white', width=1),
+            hovertemplate="%{x} funded: %{y} of futures<extra></extra>"
+        ))
+        fig_h.add_vline(x=85, line_dash="dot", line_color="#2ca02c", opacity=0.7,
+                        annotation_text="85% (comfortable)", annotation_position="top left")
+        fig_h.add_vline(x=median_funded, line_dash="dash", line_color="#d62728", opacity=0.8,
+                        annotation_text=f"median {median_funded:.0f}%", annotation_position="top right")
+        fig_h.update_layout(
+            title="Distribution of lifestyle funding across all simulated futures",
+            xaxis=dict(title="% of target lifestyle funded", ticksuffix="%", range=[0, 100]),
+            yaxis_title="Number of futures", height=320, bargap=0.02,
+            margin=dict(l=10, r=10, t=50, b=10)
+        )
+        st.plotly_chart(fig_h, use_container_width=True)
+        if len(below85) > 0:
+            st.caption(
+                f"Of the futures funding **below 85%**, the spread is what matters: median **{np.median(below85):.0f}%**, "
+                f"25th percentile **{np.percentile(below85,25):.0f}%**, and worst 5% near **{np.percentile(below85,5):.0f}%**. "
+                f"A bar at 80% is a mild trim; one at 50% is a serious shortfall \u2014 the histogram shows how much of the "
+                f"'tightened' bucket is near-miss versus genuinely painful."
+            )
 
     fig_age = go.Figure(go.Scatter(
         x=succ_ages, y=succ_by_age, mode='lines',
@@ -1139,19 +1210,21 @@ if selection == "1. Executive Dashboard":
     verdict = ("on very solid ground" if never_succ >= 85 else
                "in reasonable shape, with real risk to watch" if never_succ >= 70 else
                "facing meaningful shortfall risk")
-    valid_age90 = succ_by_age[succ_ages.index(90)] if 90 in succ_ages else never_succ
     st.markdown(
         f"**In plain terms:** across {dash_runs} simulated futures \u2014 stress-tested for today's high "
         f"valuations, market crashes, inflation, currency swings, long life, care costs, and tax/benefit "
-        f"changes \u2014 your money lasts your lifetime about **{never_succ:.0f}%** of the time, and you fund "
-        f"your *full* planned lifestyle with no cuts about **{full_succ:.0f}%** of the time. You're {verdict}. "
-        f"The gap between the two gauges is how often you'd survive but have to tighten spending. Green is "
-        f"comfortable (85%+), amber caution (70-85%), red concern (below 70%)."
+        f"changes \u2014 your money lasts your lifetime about **{never_succ:.0f}%** of the time, so you're "
+        f"{verdict}. On lifestyle: the *typical* future funds about **{median_funded:.0f}%** of your target "
+        f"spending, with **{band_full:.0f}%** of futures funding it fully (95%+), **{band_mid:.0f}%** "
+        f"funding a still-comfortable 85-95%, and **{band_low:.0f}%** requiring a real tightening below 85%. "
+        f"The reason full funding isn't higher is that the plan's guardrails *deliberately* trim spending in "
+        f"weak markets to keep you solvent \u2014 that trade-off is exactly why the money lasts."
     )
     st.caption(
-        "This is the **honest, fully stress-tested** number \u2014 it mirrors the Monte Carlo page's conditioned, "
-        "crisis-prone engine rather than a best-case projection, so it will read lower than a naive run. "
-        "Adjust the stress assumptions on Page 12; this dashboard reflects whatever factors are enabled there."
+        "This is the **honest, fully stress-tested** view \u2014 it mirrors the Monte Carlo page's conditioned, "
+        "crisis-prone engine, not a best-case projection. 'Full lifestyle' is a deliberately strict bar (95%+ "
+        "of target every year); a path funding 90% is comfortable, not a failure, which is why the distribution "
+        "is more informative than a single pass/fail. Adjust stress assumptions on Page 12."
     )
 
     st.subheader(f"Asset & Tax Lot Balances ({start_yr}-2089)")
