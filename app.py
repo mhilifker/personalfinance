@@ -90,8 +90,8 @@ if 'pmi_rate' not in st.session_state: st.session_state.pmi_rate = 0.5
 if 'ann_apprec' not in st.session_state: st.session_state.ann_apprec = 2.0
 
 # Decoupled SS Claim Ages
-if 'mike_ss_age' not in st.session_state: st.session_state.mike_ss_age = 68
-if 'steph_ss_age' not in st.session_state: st.session_state.steph_ss_age = 70
+if 'mike_ss_age' not in st.session_state: st.session_state.mike_ss_age = 65
+if 'steph_ss_age' not in st.session_state: st.session_state.steph_ss_age = 68
 # Tracks whether the claim ages were set by the dynamic optimizer (vs manual input).
 if 'ss_ages_optimized' not in st.session_state: st.session_state.ss_ages_optimized = False
 
