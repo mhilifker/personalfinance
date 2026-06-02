@@ -1203,7 +1203,27 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         draw_matrix[yr] = d_col
         
         t_col = {a: (taxes[a] / draws[a] if draws[a] > 0 else 0.0) for a in asset_rows}
-        t_col["Michael's SS"], t_col["Stephanie's SS"] = 0.0, 0.0
+        # SS tax is computed centrally as a household "shadow tax" (irs_shadow_tax_usd) rather
+        # than per-asset, so these rows previously displayed 0% even though SS IS taxed. Show each
+        # person's effective SS tax rate = (their share of the taxed shadow tax) / (their benefit).
+        # This must respect the survivor phase: there, only the LARGER benefit is actually received
+        # and taxed, so the tax is attributed to the surviving benefit and the lost one shows 0%.
+        # The Weighted Average already includes this tax in numerator and denominator -> unchanged.
+        if in_survivor_phase:
+            # Only the larger benefit survives; the shadow tax falls entirely on it.
+            if ss_m >= ss_s:
+                t_col["Michael's SS"] = (irs_shadow_tax_usd / ss_m) if ss_m > 0 else 0.0
+                t_col["Stephanie's SS"] = 0.0
+            else:
+                t_col["Stephanie's SS"] = (irs_shadow_tax_usd / ss_s) if ss_s > 0 else 0.0
+                t_col["Michael's SS"] = 0.0
+        else:
+            gross_ss_total = ss_m + ss_s
+            if gross_ss_total > 0:
+                t_col["Michael's SS"] = (irs_shadow_tax_usd * (ss_m / gross_ss_total)) / ss_m if ss_m > 0 else 0.0
+                t_col["Stephanie's SS"] = (irs_shadow_tax_usd * (ss_s / gross_ss_total)) / ss_s if ss_s > 0 else 0.0
+            else:
+                t_col["Michael's SS"], t_col["Stephanie's SS"] = 0.0, 0.0
         t_col["Weighted Average"] = total_taxes_paid_usd / (total_gross_portfolio + gross_ss_usd) if (total_gross_portfolio + gross_ss_usd) > 0 else 0
         tax_matrix[yr] = t_col
         
