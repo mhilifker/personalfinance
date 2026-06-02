@@ -10,6 +10,25 @@ from plotly.subplots import make_subplots
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Slovenian Arbitrage Dashboard", layout="wide")
 
+# Match Streamlit's top header bar to the app's dark theme (it defaults to white/transparent
+# and looks out of place). This colors the header and its toolbar to the dark background.
+st.markdown(
+    """
+    <style>
+    [data-testid="stHeader"] {
+        background-color: #0e1117;
+    }
+    [data-testid="stToolbar"] {
+        background-color: #0e1117;
+    }
+    [data-testid="stDecoration"] {
+        background: #0e1117;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Initialize Master Inputs
 if 'ret_age' not in st.session_state: st.session_state.ret_age = 55 
 if 'move_age' not in st.session_state: st.session_state.move_age = 56
@@ -242,31 +261,6 @@ def sample_death_age(current_age, sex_table, rng):
             break
         age += 1
     return age
-
-
-def _norm_ppf(p):
-    """Inverse standard-normal CDF via Acklam's rational approximation (~1e-7 accurate).
-    Replaces scipy.stats.norm.ppf so the app has no scipy dependency (scipy is not
-    installed in the deployment environment). Uses only numpy (np.log)."""
-    p = min(max(p, 1e-9), 1 - 1e-9)
-    a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
-         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00]
-    b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
-         6.680131188771972e+01, -1.328068155288572e+01]
-    c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
-         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00]
-    d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
-         3.754408661907416e+00]
-    plow, phigh = 0.02425, 1 - 0.02425
-    if p < plow:
-        q = (-2 * np.log(p)) ** 0.5
-        return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1)
-    elif p <= phigh:
-        q = p - 0.5; r = q*q
-        return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q / (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1)
-    else:
-        q = (-2 * np.log(1-p)) ** 0.5
-        return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1)
 
 
 def build_valuation_shift(n_years, usd_mean, eur_mean):
@@ -3288,6 +3282,7 @@ elif selection == "14. Variance Decomposition (Sobol)":
     sweep_pts = st.number_input("Points per factor sweep", value=7, min_value=3, max_value=15, step=2)
 
     if st.button("Run Sensitivity Decomposition"):
+        from scipy.stats import norm
         years = list(range(2026, 2090)); nN = len(years)
         start = st.session_state.current_age
         common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
@@ -3310,7 +3305,7 @@ elif selection == "14. Variance Decomposition (Sobol)":
 
         def evaluate(row):
             u_eq, u_inf, u_fx, u_lon, u_ltc, u_tax = row
-            z_eq = _norm_ppf(min(max(u_eq, 1e-4), 1 - 1e-4))
+            z_eq = norm.ppf(min(max(u_eq, 1e-4), 1 - 1e-4))
             # Sustained 64-year AVERAGE return disperses far less than a single year. Map the
             # quantile to roughly +/-3% around the mean (a wide but plausible realized-average
             # band) so the dollar swing is meaningful, not an absurd single-year extrapolation.
