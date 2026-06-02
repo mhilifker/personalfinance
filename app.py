@@ -1424,20 +1424,23 @@ if selection == "1. Executive Dashboard":
         fig_d.add_trace(go.Bar(x=[band_low], y=["Lifestyle"], orientation='h',
                                name="Tightened (<85%)", marker_color='#fdae6b',
                                text=f"{band_low:.0f}%", textposition='inside'))
+    st.markdown("**How fully is your lifestyle funded?**  \n"
+                    f"<span style='color:gray;font-size:0.9em'>Typical path funds {median_funded:.0f}% of target</span>",
+                    unsafe_allow_html=True)
         fig_d.update_layout(
-            barmode='stack', height=180,
-            title={'text': f"How fully is your lifestyle funded?<br><span style='font-size:0.99em;color:gray'>Typical path funds {median_funded:.0f}% of target</span>",
-                   'y': 0.97, 'yanchor': 'top'},
+            barmode='stack', height=230,
+            title=None,
             xaxis=dict(range=[0, 100], ticksuffix="%",
-                       title=dict(text="Share of simulated futures", standoff=22)),
+                       title=dict(text="Share of simulated futures", standoff=25)),
             yaxis=dict(showticklabels=False),
-            legend=dict(orientation='h', y=-0.55, x=0.5, xanchor='center',
-                        itemwidth=40, font=dict(size=12), tracegroupgap=20,
-                        itemsizing='constant'),
-            margin=dict(l=10, r=10, t=95, b=40)
+            legend=dict(orientation='h', y=-0.9, x=0.5, xanchor='center',
+                        font=dict(size=12)),
+            margin=dict(l=10, r=10, t=20, b=90)
         )
-        st.plotly_chart(fig_d, use_container_width=True)
-        st.metric("Typical lifestyle funded (median)", f"{median_funded:.0f}%")
+        fig_d.update_yaxes(automargin=True)
+        st.plotly_chart(fig_d, use_container_width=True,
+                        config={'displayModeBar': False})
+
 
     # Full histogram of funded ratios so the coarse bands don't hide the shape \u2014 e.g. how
     # much of the "below 85%" mass is a near-miss 80% vs a genuine 40% shortfall.
