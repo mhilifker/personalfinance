@@ -1400,7 +1400,7 @@ if selection == "1. Executive Dashboard":
     g1, g2 = st.columns(2)
     with g1:
         fig_g = go.Figure(go.Indicator(
-            mode="gauge+number", value=never_succ, number={'suffix': "%", 'font': {'size': 40}},
+            mode="gauge+number", value=never_succ, number={'suffix': "%", 'font': {'size': 80}},
             title={'text': "Money Never Runs Out<br><span style='font-size:0.78em;color:gray'>(solvent through your lifetime)</span>"},
             gauge={'axis': {'range': [0, 100], 'ticksuffix': "%"},
                    'bar': {'color': _band(never_succ), 'thickness': 0.3},
