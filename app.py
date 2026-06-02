@@ -15,7 +15,7 @@ if 'ret_age' not in st.session_state: st.session_state.ret_age = 55
 if 'move_age' not in st.session_state: st.session_state.move_age = 56
 if 'current_age' not in st.session_state: st.session_state.current_age = 37
 if 'nb_start_yr' not in st.session_state: st.session_state.nb_start_yr = 2027
-if 'inflation_rate' not in st.session_state: st.session_state.inflation_rate = 3.0
+if 'inflation_rate' not in st.session_state: st.session_state.inflation_rate = 2.9
 
 # Bifurcated Returns
 if 'usd_market_return' not in st.session_state: st.session_state.usd_market_return = 7.0
@@ -80,7 +80,15 @@ if 'ss_ages_optimized' not in st.session_state: st.session_state.ss_ages_optimiz
 if 'mike_future_pct' not in st.session_state: st.session_state.mike_future_pct = 80 
 if 'steph_future_pct' not in st.session_state: st.session_state.steph_future_pct = 80 
 if 'trust_fund_haircut' not in st.session_state: st.session_state.trust_fund_haircut = 20 
-if 'cola_rate' not in st.session_state: st.session_state.cola_rate = 2.1
+if 'cola_rate' not in st.session_state: st.session_state.cola_rate = 2.6
+# COLA assumption mode. The Social Security COLA can be run as the empirically-defensible
+# BASELINE (a modest ~0.3pt structural lag vs inflation, the CPI-W/CPI-U basket difference),
+# or as a STRESS case that models SS COLAs persistently lagging inflation by a large margin
+# (a ~0.8-0.9pt gap), which erodes real SS benefits substantially over a long retirement and
+# hits the survivor hardest. cola_rate above is the baseline; cola_stress_rate is the stress
+# value; cola_mode selects which one the engine actually uses, so the choice is never invisible.
+if 'cola_mode' not in st.session_state: st.session_state.cola_mode = "Baseline (modest structural lag)"
+if 'cola_stress_rate' not in st.session_state: st.session_state.cola_stress_rate = 2.1
 if 'awi_rate' not in st.session_state: st.session_state.awi_rate = 3.5
 
 # Spending Targets (2026 Dollars)
@@ -192,6 +200,23 @@ MSCI_EUR_TOTAL_RETURNS = {
 # S&P 500 returns keyed by year (for paired calendar-year sampling with the EUR series).
 SP500_BY_YEAR = {1928 + i: SP500_TOTAL_RETURNS[i] for i in range(len(SP500_TOTAL_RETURNS))}
 
+# US CPI-U annual inflation (%), Dec-to-Dec, BLS, 1928-2025. Used by the historical-cohort
+# backtest (Page 15) to feed each cohort the REAL inflation it actually faced -- essential
+# because the 1966 and 1973 cohorts were destroyed as much by 1970s inflation as by weak
+# equity returns. Without real inflation, a cohort backtest flatters the plan badly.
+US_CPI_BY_YEAR = {
+    1928:-1.7,1929:0.0,1930:-2.3,1931:-9.0,1932:-9.9,1933:0.8,1934:1.5,1935:3.0,1936:1.4,1937:2.9,
+    1938:-2.8,1939:0.0,1940:0.7,1941:9.9,1942:9.0,1943:3.0,1944:2.3,1945:2.2,1946:18.1,1947:8.8,
+    1948:3.0,1949:-2.1,1950:5.9,1951:6.0,1952:0.8,1953:0.7,1954:-0.7,1955:0.4,1956:3.0,1957:2.9,
+    1958:1.8,1959:1.7,1960:1.4,1961:0.7,1962:1.3,1963:1.6,1964:1.0,1965:1.9,1966:3.5,1967:3.0,
+    1968:4.7,1969:6.2,1970:5.6,1971:3.3,1972:3.4,1973:8.7,1974:12.3,1975:6.9,1976:4.9,1977:6.7,
+    1978:9.0,1979:13.3,1980:12.5,1981:8.9,1982:3.8,1983:3.8,1984:3.9,1985:3.8,1986:1.1,1987:4.4,
+    1988:4.4,1989:4.6,1990:6.1,1991:3.1,1992:2.9,1993:2.7,1994:2.7,1995:2.5,1996:3.3,1997:1.7,
+    1998:1.6,1999:2.7,2000:3.4,2001:1.6,2002:2.4,2003:1.9,2004:3.3,2005:3.4,2006:2.5,2007:4.1,
+    2008:0.1,2009:2.7,2010:1.5,2011:3.0,2012:1.7,2013:1.5,2014:0.8,2015:0.7,2016:2.1,2017:2.1,
+    2018:1.9,2019:2.3,2020:1.4,2021:7.0,2022:6.5,2023:3.4,2024:2.9,2025:2.9
+}
+
 # SSA 2025 period life-table life expectancy e(x) by exact age, male & female (55-114),
 # used to simulate stochastic death ages via the exact curtate relation
 # p(x) = (e(x)-0.5)/(1+(e(x+1)-0.5)), which reproduces the SSA table exactly.
@@ -217,31 +242,6 @@ def sample_death_age(current_age, sex_table, rng):
             break
         age += 1
     return age
-
-
-def _norm_ppf(p):
-    """Inverse standard-normal CDF via Acklam's rational approximation (~1e-7 accurate).
-    Replaces scipy.stats.norm.ppf so the app has no scipy dependency (scipy is not
-    installed in the deployment environment). Uses only numpy (np.log)."""
-    p = min(max(p, 1e-9), 1 - 1e-9)
-    a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
-         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00]
-    b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
-         6.680131188771972e+01, -1.328068155288572e+01]
-    c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
-         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00]
-    d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
-         3.754408661907416e+00]
-    plow, phigh = 0.02425, 1 - 0.02425
-    if p < plow:
-        q = (-2 * np.log(p)) ** 0.5
-        return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1)
-    elif p <= phigh:
-        q = p - 0.5; r = q*q
-        return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q / (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1)
-    else:
-        q = (-2 * np.log(1-p)) ** 0.5
-        return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1)
 
 
 def build_valuation_shift(n_years, usd_mean, eur_mean):
@@ -612,11 +612,22 @@ def calculate_person_benefit(history_dict, current_age, ret_age, claim_age, futu
         else: timeline[yr] = annual_at_claim * ((1 + (cola / 100)) ** (yr - claim_year))
     return timeline
 
+def effective_cola():
+    """Resolve the COLA actually used by the engine from the selected mode. Baseline uses
+    cola_rate (modest structural lag); Stress uses cola_stress_rate (large persistent lag).
+    Centralizing this makes the COLA assumption explicit and consistent everywhere SS is
+    computed, instead of a single invisible number."""
+    mode = st.session_state.get('cola_mode', "Baseline (modest structural lag)")
+    if str(mode).startswith("Stress"):
+        return st.session_state.get('cola_stress_rate', 2.1)
+    return st.session_state.get('cola_rate', 2.6)
+
 def get_ss_timelines(override_m_age=None, override_s_age=None):
     m_age = override_m_age if override_m_age is not None else st.session_state.mike_ss_age
     s_age = override_s_age if override_s_age is not None else st.session_state.steph_ss_age
-    mike_ss = calculate_person_benefit(st.session_state.mike_history, st.session_state.current_age, st.session_state.ret_age, m_age, st.session_state.mike_future_pct, st.session_state.cola_rate, st.session_state.trust_fund_haircut, st.session_state.awi_rate)
-    steph_ss = calculate_person_benefit(st.session_state.steph_history, st.session_state.current_age, st.session_state.ret_age, s_age, st.session_state.steph_future_pct, st.session_state.cola_rate, st.session_state.trust_fund_haircut, st.session_state.awi_rate)
+    cola = effective_cola()
+    mike_ss = calculate_person_benefit(st.session_state.mike_history, st.session_state.current_age, st.session_state.ret_age, m_age, st.session_state.mike_future_pct, cola, st.session_state.trust_fund_haircut, st.session_state.awi_rate)
+    steph_ss = calculate_person_benefit(st.session_state.steph_history, st.session_state.current_age, st.session_state.ret_age, s_age, st.session_state.steph_future_pct, cola, st.session_state.trust_fund_haircut, st.session_state.awi_rate)
     return mike_ss, steph_ss
 
 def run_core_simulation(override_m_age=None, override_s_age=None, override_early_draw=None, return_overrides=None, scenario=None):
@@ -1141,7 +1152,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
 # PAGE ROUTING
 # -----------------------------------------------------------------------------
 st.sidebar.title("Navigation")
-selection = st.sidebar.radio("Navigate", ["1. Executive Dashboard", "2. Pre-Set Asset Ledger & Tax Lots", "3. Investment Policy Editor", "4. Real Estate & Relocation", "5. The Great Reset Simulator", "6. Social Security & Pensions", "7. Cash Flow & Slovenian Drip", "8. Yearly Balances (2026-2089)", "9. Tax Torpedo Optimizer", "10. Institutional Stress Testing", "11. Longevity Optimizer (Guardrails)", "12. Monte Carlo Simulation", "13. Roth Conversion Ladder Optimizer", "14. Variance Decomposition (Sobol)"])
+selection = st.sidebar.radio("Navigate", ["1. Executive Dashboard", "2. Pre-Set Asset Ledger & Tax Lots", "3. Investment Policy Editor", "4. Real Estate & Relocation", "5. The Great Reset Simulator", "6. Social Security & Pensions", "7. Cash Flow & Slovenian Drip", "8. Yearly Balances (2026-2089)", "9. Tax Torpedo Optimizer", "10. Institutional Stress Testing", "11. Longevity Optimizer (Guardrails)", "12. Monte Carlo Simulation", "13. Roth Conversion Ladder Optimizer", "14. Variance Decomposition (Sobol)", "15. Historical Cohort Backtest"])
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Quick Stress Scenarios")
@@ -1683,12 +1694,47 @@ elif selection == "6. Social Security & Pensions":
     st.session_state.awi_rate = e3.number_input("Average Wage Index growth (%)", value=st.session_state.awi_rate, step=0.1,
                                                 help="National wage growth that indexes the bend points and your earnings history.")
     f1, f2, f3 = st.columns(3)
-    st.session_state.cola_rate = f1.number_input("Annual COLA (%)", value=st.session_state.cola_rate, step=0.1,
-                                                 help="Cost-of-living adjustment applied to benefits each year.")
+    st.session_state.cola_rate = f1.number_input("Baseline COLA (%)", value=st.session_state.cola_rate, step=0.1,
+                                                 help="The empirically-defensible central COLA: a modest ~0.3pt structural lag vs inflation (the CPI-W basket SS uses runs slightly below CPI-U). This is used when COLA mode is Baseline.")
     st.session_state.trust_fund_haircut = f2.slider("SS Funding Shortfall Haircut (%)", 0, 50, st.session_state.trust_fund_haircut, 5,
                                                     help="Permanent benefit reduction from the trust-fund shortfall. The Trustees project ~20-23% if Congress does nothing by ~2033.")
     st.session_state.inflation_rate = f3.number_input("Inflation for Real $ Conversion (%)", value=st.session_state.inflation_rate, step=0.1,
                                                       help="Used to convert future nominal benefits into today's 2026 purchasing power.")
+
+    # --- COLA assumption: explicit baseline-vs-stress toggle (no longer an invisible default) ---
+    st.markdown("**COLA Assumption Mode**")
+    cm1, cm2 = st.columns([1.3, 1])
+    st.session_state.cola_mode = cm1.radio(
+        "How should SS cost-of-living adjustments be modeled?",
+        ["Baseline (modest structural lag)", "Stress (COLA persistently lags inflation)"],
+        index=0 if str(st.session_state.cola_mode).startswith("Baseline") else 1,
+        help="Baseline uses the rate above (~0.3pt structural lag, the defensible central case). "
+             "Stress applies a larger persistent gap that erodes real SS substantially over a long "
+             "retirement and hits the survivor hardest \u2014 useful for pressure-testing, but more "
+             "pessimistic than the historical record, so it shouldn't be your silent default."
+    )
+    st.session_state.cola_stress_rate = cm2.number_input(
+        "Stress COLA (%)", value=st.session_state.cola_stress_rate, step=0.1,
+        help="The COLA used in Stress mode. Default 2.1% models a ~0.8pt persistent lag vs a 2.9% "
+             "inflation assumption \u2014 the conservative wedge that was previously baked into the default."
+    )
+    _eff_cola = effective_cola()
+    _gap = st.session_state.inflation_rate - _eff_cola
+    # Illustrative real-SS erosion over 30 years at the current gap.
+    _erosion = (1 - ((1 + _eff_cola/100) / (1 + st.session_state.inflation_rate/100)) ** 30) * 100
+    if _gap <= 0.45:
+        st.success(
+            f"**Active COLA: {_eff_cola:.1f}%** vs inflation {st.session_state.inflation_rate:.1f}% "
+            f"\u2014 a {_gap:+.1f}pt gap (modest, defensible). At this gap, real SS purchasing power "
+            f"erodes ~{_erosion:.0f}% over 30 years."
+        )
+    else:
+        st.warning(
+            f"**Active COLA: {_eff_cola:.1f}%** vs inflation {st.session_state.inflation_rate:.1f}% "
+            f"\u2014 a {_gap:+.1f}pt gap (stress). This erodes real SS purchasing power ~{_erosion:.0f}% "
+            f"over 30 years and compounds with the {st.session_state.trust_fund_haircut}% trust-fund "
+            f"haircut \u2014 a deliberately pessimistic SS scenario, most punishing for the survivor."
+        )
 
     st.markdown("---")
     st.subheader("Optimized Claim Ages")
@@ -3217,6 +3263,7 @@ elif selection == "14. Variance Decomposition (Sobol)":
     sweep_pts = st.number_input("Points per factor sweep", value=7, min_value=3, max_value=15, step=2)
 
     if st.button("Run Sensitivity Decomposition"):
+        from scipy.stats import norm
         years = list(range(2026, 2090)); nN = len(years)
         start = st.session_state.current_age
         common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
@@ -3239,7 +3286,7 @@ elif selection == "14. Variance Decomposition (Sobol)":
 
         def evaluate(row):
             u_eq, u_inf, u_fx, u_lon, u_ltc, u_tax = row
-            z_eq = _norm_ppf(min(max(u_eq, 1e-4), 1 - 1e-4))
+            z_eq = norm.ppf(min(max(u_eq, 1e-4), 1 - 1e-4))
             # Sustained 64-year AVERAGE return disperses far less than a single year. Map the
             # quantile to roughly +/-3% around the mean (a wide but plausible realized-average
             # band) so the dollar swing is meaningful, not an absurd single-year extrapolation.
@@ -3327,3 +3374,201 @@ elif selection == "14. Variance Decomposition (Sobol)":
             "one-at-a-time structural sensitivity (others held at median), so it ranks lever importance but "
             "does not itself quantify interactions \u2014 the Page 12 interaction matrix covers those. Not advice."
         )
+# -----------------------------------------------------------------------------
+# 15. HISTORICAL COHORT BACKTEST
+# -----------------------------------------------------------------------------
+elif selection == "15. Historical Cohort Backtest":
+    st.header("15. Historical Cohort Backtest")
+    st.markdown(
+        "The ultimate validation: would this exact plan have **survived the real past?** "
+        "Instead of resampling or simulating, this feeds the model the *actual* sequence of "
+        "S&P 500 returns and US inflation a retiree would have faced starting in each year "
+        "from 1928 onward, and checks whether the plan held up. The cohorts that retired into "
+        "**1966, 1973, and 2000** are the ones that broke many supposedly-safe plans \u2014 not "
+        "because of a single crash, but because a weak first decade plus high inflation "
+        "drained the portfolio before markets recovered. If your plan survives those, it is "
+        "robust in a way no single Monte Carlo number can show."
+    )
+    st.info(
+        "Each cohort uses real history for BOTH equity returns and inflation. Because "
+        "independent European return data only exists from 2000, deep-history cohorts apply "
+        "the US equity sequence to both sleeves (a documented approximation \u2014 the point is "
+        "the sequence-and-inflation stress, which is US-data-rich back to 1928). Your strategy, "
+        "guardrails, taxes, SS, and spending are exactly as configured elsewhere; only the "
+        "market/inflation path is replaced with history."
+    )
+
+    bt_horizon = st.number_input("Planning horizon to test (years from retirement)", value=35, min_value=20, max_value=50, step=1,
+                                 help="A cohort 'survives' if the portfolio stays solvent this many years past retirement. 35 years is a common robustness bar for an early retiree.")
+    apply_real_eur = st.checkbox("Use real European data for 2000+ cohorts (paired)", value=True,
+                                 help="For cohorts starting 2000 or later, use the actual MSCI Europe EUR series for the EUR sleeve instead of mirroring US returns.")
+    recenter = st.checkbox("Recenter returns to my assumed mean (isolate sequence risk)", value=True,
+                           help="History compounded at ~10-12%/yr nominal, well above your ~7% forward assumption, so a RAW backtest flatters every cohort and lets the 1929 cohort balloon to absurd terminal wealth. Recentering shifts each cohort's average return to YOUR assumption while preserving the historical SEQUENCE, volatility, and crash clustering -- so the test isolates 'would this sequence-and-inflation pattern have worked at my return level' (the question that matters). Uncheck to see raw historical levels.")
+
+    if st.button("Run Historical Backtest"):
+        years_model = list(range(2026, 2090))
+        n_model = len(years_model)
+        start_age = st.session_state.current_age
+        ret_age = st.session_state.ret_age
+        ret_offset = ret_age - start_age  # model years from 2026 to retirement
+        H = int(bt_horizon)
+
+        # Real return + inflation history.
+        hist_years = sorted(US_CPI_BY_YEAR.keys() & SP500_BY_YEAR.keys())
+        first_hist, last_hist = min(hist_years), max(hist_years)
+        # A cohort needs returns for the full model horizon from RETIREMENT onward up to H years,
+        # but the model also simulates the pre-retirement accumulation. We map historical year
+        # H0 to the RETIREMENT year, and walk forward; pre-retirement years borrow the run-up
+        # history before H0 where available, else repeat the earliest available year.
+        # Cohort is viable if we have H years of history at/after the retirement-mapped year.
+        cohort_starts = [y for y in hist_years if y + H <= last_hist + 1]
+
+        if not cohort_starts:
+            st.error("Not enough history for that horizon. Lower the horizon.")
+        else:
+            usd_assume = st.session_state.usd_market_return / 100.0
+            eur_assume = st.session_state.eur_market_return / 100.0
+            def hist_path(h0):
+                # Build per-model-year returns & inflation. Model year 2026 = (h0 - ret_offset).
+                # Retirement model-year (2026+ret_offset) maps to historical year h0.
+                ret_model_yr = 2026 + ret_offset
+                raw_us = {}; raw_eu = {}; raw_inf = {}
+                for my in years_model:
+                    hy = h0 + (my - ret_model_yr)  # historical year aligned so retirement=h0
+                    hy_clamped = min(max(hy, first_hist), last_hist)
+                    raw_us[my] = SP500_BY_YEAR[hy_clamped] / 100.0
+                    if apply_real_eur and hy_clamped in MSCI_EUR_TOTAL_RETURNS:
+                        raw_eu[my] = MSCI_EUR_TOTAL_RETURNS[hy_clamped] / 100.0
+                    else:
+                        raw_eu[my] = raw_us[my]  # approximation for deep-history cohorts
+                    raw_inf[my] = US_CPI_BY_YEAR[hy_clamped] / 100.0
+                # Recenter (optional): shift each sleeve so its mean over the span equals the
+                # user's assumed return, preserving every deviation so the SEQUENCE, volatility,
+                # and crash clustering stay intact. Inflation is NEVER recentered -- feeding the
+                # real historical CPI path is the whole point of the backtest.
+                us_shift = (usd_assume - np.mean(list(raw_us.values()))) if recenter else 0.0
+                eu_shift = (eur_assume - np.mean(list(raw_eu.values()))) if recenter else 0.0
+                returns = {my: (raw_us[my] + us_shift, raw_eu[my] + eu_shift) for my in years_model}
+                return returns, raw_inf, ret_model_yr
+
+            results = []
+            prog = st.progress(0.0, text="Backtesting cohorts...")
+            for k, h0 in enumerate(cohort_starts):
+                returns, inflation, ret_model_yr = hist_path(h0)
+                sc = {'returns': returns, 'inflation': inflation}
+                db, dd, _, _, _ = run_core_simulation(scenario=sc)
+                tot = db.loc['Total Portfolio Balance']
+                # Survival horizon: H years past retirement.
+                horizon_yr = min(2089, ret_model_yr + H)
+                window = [y for y in years_model if ret_model_yr <= y <= horizon_yr]
+                depleted = tot[(tot.index >= ret_model_yr) & (tot.index <= horizon_yr) & (tot <= 0)]
+                survived = len(depleted) == 0
+                fail_yr_hist = (h0 + (depleted.index.min() - ret_model_yr)) if not survived else None
+                # Lowest real funded ratio across retirement window (achieved/target).
+                cpi = 1.0; cum = {}
+                for my in years_model:
+                    if my > 2026: cpi *= (1 + inflation[my])
+                    cum[my] = cpi
+                life = dd.loc["Actual Lifestyle Spend"]
+                def tgt_real(my):
+                    a = start_age + (my - 2026)
+                    return st.session_state.spend_golden if a < 70 else (st.session_state.spend_middle if a < 85 else st.session_state.spend_wind)
+                ratios = []
+                for my in window:
+                    t = tgt_real(my)
+                    if t > 0:
+                        ratios.append((life.get(my, 0)/cum[my]) / t)
+                min_funded = min(ratios) if ratios else 1.0
+                avg_funded = float(np.mean(ratios)) if ratios else 1.0
+                term_real = tot[horizon_yr] / cum[horizon_yr] if horizon_yr in tot.index else np.nan
+                results.append({
+                    'cohort': h0, 'survived': survived, 'fail_year': fail_yr_hist,
+                    'min_funded': min_funded, 'avg_funded': avg_funded, 'terminal_real': term_real
+                })
+                prog.progress((k+1)/len(cohort_starts), text=f"Cohort {h0} done")
+            prog.progress(1.0, text="Complete.")
+
+            df_bt = pd.DataFrame(results)
+            surv_rate = 100.0 * df_bt['survived'].mean()
+            n_cohorts = len(df_bt)
+            n_fail = int((~df_bt['survived']).sum())
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Historical Survival Rate", f"{surv_rate:.0f}%", help=f"Share of {n_cohorts} starting years (1928-{cohort_starts[-1]}) whose plan stayed solvent for {H} years.")
+            c2.metric("Cohorts Tested", f"{n_cohorts}")
+            c3.metric("Cohorts That Failed", f"{n_fail}")
+
+            # Survival/terminal-wealth bar by cohort.
+            fig_bt = go.Figure()
+            colors = ['#2ca02c' if s else '#d62728' for s in df_bt['survived']]
+            fig_bt.add_trace(go.Bar(
+                x=df_bt['cohort'], y=df_bt['min_funded']*100, marker_color=colors,
+                hovertemplate="Cohort %{x}: lowest funded %{y:.0f}% of target<extra></extra>",
+                name="Lowest funded ratio"
+            ))
+            fig_bt.add_hline(y=100, line_dash="dot", line_color="grey", annotation_text="100% of target")
+            fig_bt.update_layout(
+                title=f"Worst Real-Spending Year by Retirement Cohort (green=survived {H}y, red=depleted)",
+                xaxis_title="Retirement Start Year (historical)",
+                yaxis_title="Lowest funded ratio in retirement (%)", height=400
+            )
+            st.plotly_chart(fig_bt, use_container_width=True)
+
+            # Spotlight the famous killer cohorts.
+            st.subheader("The Cohorts That Break Plans")
+            spotlight = [1966, 1973, 2000, 1929]
+            rows = []
+            for sy in spotlight:
+                r = df_bt[df_bt['cohort'] == sy]
+                if not r.empty:
+                    r = r.iloc[0]
+                    rows.append({
+                        "Cohort": sy,
+                        "Survived": "✅ Yes" if r['survived'] else "❌ No",
+                        "Failed In": "—" if r['survived'] else f"{int(r['fail_year'])}",
+                        "Lowest Funded": f"{r['min_funded']*100:.0f}%",
+                        "Avg Funded": f"{r['avg_funded']*100:.0f}%",
+                        "Terminal Real": f"${r['terminal_real']/1e6:.1f}M" if pd.notna(r['terminal_real']) else "n/a"
+                    })
+            if rows:
+                st.dataframe(pd.DataFrame(rows).set_index("Cohort"), use_container_width=True)
+
+            # Worst 5 cohorts overall.
+            worst = df_bt.sort_values('min_funded').head(5)
+            st.subheader("5 Worst Cohorts in History")
+            wrows = [{
+                "Cohort": int(r['cohort']),
+                "Survived": "✅" if r['survived'] else "❌",
+                "Lowest Funded": f"{r['min_funded']*100:.0f}%",
+                "Avg Funded": f"{r['avg_funded']*100:.0f}%",
+                "Terminal Real": f"${r['terminal_real']/1e6:.1f}M" if pd.notna(r['terminal_real']) else "n/a"
+            } for _, r in worst.iterrows()]
+            st.dataframe(pd.DataFrame(wrows).set_index("Cohort"), use_container_width=True)
+
+            # Verdict.
+            killer_survived = df_bt[df_bt['cohort'].isin([1966,1973,2000])]['survived']
+            if surv_rate >= 95 and killer_survived.all():
+                verdict = ("**Robust.** The plan survives essentially all historical cohorts, including "
+                           "the notorious 1966/1973/2000 sequences that break naive plans. This is strong, "
+                           "real-world validation that your guardrails and spending plan handle sequence-and-"
+                           "inflation risk, not just average returns.")
+            elif surv_rate >= 85:
+                verdict = (f"**Mostly robust.** {surv_rate:.0f}% of cohorts survived. Inspect the failures "
+                           "above \u2014 if they cluster in the high-inflation 1960s-70s starts, your plan's "
+                           "weak point is inflation eroding real spending, and a more inflation-protected "
+                           "allocation or a lower initial withdrawal would close the gap.")
+            else:
+                verdict = (f"**Fragile to history.** Only {surv_rate:.0f}% of cohorts survived. The plan as "
+                           "configured would have failed in a meaningful share of real historical sequences. "
+                           "The Monte Carlo success rate is more optimistic than history justifies \u2014 worth "
+                           "lowering spending, tightening guardrails, or de-risking the early-retirement years.")
+            st.markdown(verdict)
+            st.caption(
+                "Backtest feeds real S&P 500 returns and real US CPI inflation per cohort; your guardrails, "
+                "taxes, SS, gifting, and spending are unchanged. Caveat: only US equity history reaches back "
+                "to 1928, so deep-history cohorts approximate the EUR sleeve with US returns; the cross-border "
+                "tax and FX specifics of the actual plan are not what 1928-1990 retirees faced. This validates "
+                "SEQUENCE and INFLATION robustness, the dimensions history is richest on. Not a guarantee \u2014 "
+                "the future can be worse than any realized past, which is why the crisis-overlay Monte Carlo "
+                "and this backtest are complements, not substitutes."
+            )
