@@ -26,7 +26,7 @@ if 'execute_great_reset' not in st.session_state: st.session_state.execute_great
 if 'enable_smoothing' not in st.session_state: st.session_state.enable_smoothing = True
 if 'target_early_draw' not in st.session_state: st.session_state.target_early_draw = 210000
 if 'gift_start_age' not in st.session_state: st.session_state.gift_start_age = 58
-if 'gift_end_age' not in st.session_state: st.session_state.gift_end_age = 83
+if 'gift_end_age' not in st.session_state: st.session_state.gift_end_age = 78
 # Master on/off for the dynamic generational gifting drip. When False, the model does NOT
 # gift surplus away (it lets the portfolio accumulate), regardless of the age window.
 if 'gifting_enable' not in st.session_state: st.session_state.gifting_enable = True
@@ -71,7 +71,7 @@ if 'pmi_rate' not in st.session_state: st.session_state.pmi_rate = 0.5
 if 'ann_apprec' not in st.session_state: st.session_state.ann_apprec = 2.0
 
 # Decoupled SS Claim Ages
-if 'mike_ss_age' not in st.session_state: st.session_state.mike_ss_age = 67
+if 'mike_ss_age' not in st.session_state: st.session_state.mike_ss_age = 68
 if 'steph_ss_age' not in st.session_state: st.session_state.steph_ss_age = 70
 # Tracks whether the claim ages were set by the dynamic optimizer (vs manual input).
 if 'ss_ages_optimized' not in st.session_state: st.session_state.ss_ages_optimized = False
@@ -96,7 +96,7 @@ if 'floor_wind' not in st.session_state: st.session_state.floor_wind = 72000
 if 'slash_trigger' not in st.session_state: st.session_state.slash_trigger = 5.25
 if 'recovery_trigger' not in st.session_state: st.session_state.recovery_trigger = 4.25
 if 'raise_pct' not in st.session_state: st.session_state.raise_pct = 33.0
-if 'dynamic_gift_pct' not in st.session_state: st.session_state.dynamic_gift_pct = 65.0
+if 'dynamic_gift_pct' not in st.session_state: st.session_state.dynamic_gift_pct = 50.0
 
 # Institutional Stress Test Macros
 if 'sorr_enable' not in st.session_state: st.session_state.sorr_enable = False
@@ -119,7 +119,7 @@ if 'mc_block_len' not in st.session_state: st.session_state.mc_block_len = 5
 # or as the raw ARITHMETIC mean of annual returns (realized compounding is then lower).
 if 'mc_mean_type' not in st.session_state: st.session_state.mc_mean_type = "Compound (CAGR) target"
 # Explicit lifetime gifting goal (real 2026 $) to measure "gift success" against in MC.
-if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 750000
+if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 500000
 # Multi-factor stress toggles and parameters for the Monte Carlo.
 if 'mc_stoch_inflation' not in st.session_state: st.session_state.mc_stoch_inflation = True
 if 'mc_infl_vol' not in st.session_state: st.session_state.mc_infl_vol = 1.5
@@ -274,7 +274,7 @@ def score_joint_success_for_ss(n_runs, seed, m_age, s_age):
     start = st.session_state.current_age
     ret_start = 2026 + (st.session_state.ret_age - st.session_state.current_age)
     ret_years = [y for y in years if y >= ret_start]
-    gift_goal = float(st.session_state.get('mc_gift_goal', 750000))
+    gift_goal = float(st.session_state.get('mc_gift_goal', 500000))
     def _tgt(a):
         return st.session_state.spend_golden if a < 70 else (st.session_state.spend_middle if a < 85 else st.session_state.spend_wind)
     tmap = {y: _tgt(start + (y - 2026)) for y in ret_years}
@@ -529,9 +529,9 @@ if 'asset_balances' not in st.session_state:
 if 'policy_df' not in st.session_state:
     st.session_state.policy_df = pd.DataFrame({
         "Asset Category": list(st.session_state.asset_balances.keys()),
-        "Annual Savings Escalator (%)": [0.0, 0.0, 0.0, 0.0, -20.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        "Current State": [0, 30000, 30000, 0, 15000, 18000, 0, 0, 8300, 0],
-        "Northbrook Grind": [0, 15000, 30000, 0, 15000, 18000, 0, 0, 0, 0]
+        "Annual Savings Escalator (%)": [0.0, 2.5, 0.0, 0.0, -20.0, 2.5, 0.0, 0.0, 0.0, 0.0],
+        "Current State": [0, 30000, 30000, 0, 15000, 30000, 0, 0, 8300, 0],
+        "Northbrook Grind": [0, 30000, 30000, 0, 15000, 30000, 0, 0, 0, 0]
     })
 
 if 'mike_history' not in st.session_state:
