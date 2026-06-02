@@ -81,12 +81,12 @@ if 'sl_ss_net_rate' not in st.session_state: st.session_state.sl_ss_net_rate = 0
 
 
 # Real Estate Assumptions 
-if 'home_price' not in st.session_state: st.session_state.home_price = 1200000
+if 'home_price' not in st.session_state: st.session_state.home_price = 1050000
 if 'down_payment' not in st.session_state: st.session_state.down_payment = 150000
 if 'mtg_rate' not in st.session_state: st.session_state.mtg_rate = 6.5
-if 'tax_rate' not in st.session_state: st.session_state.tax_rate = 2.1 
-if 'ann_insurance' not in st.session_state: st.session_state.ann_insurance = 3000
-if 'pmi_rate' not in st.session_state: st.session_state.pmi_rate = 0.5 
+if 'tax_rate' not in st.session_state: st.session_state.tax_rate = 1.9
+if 'ann_insurance' not in st.session_state: st.session_state.ann_insurance = 4000
+if 'pmi_rate' not in st.session_state: st.session_state.pmi_rate = 0.0 
 if 'ann_apprec' not in st.session_state: st.session_state.ann_apprec = 2.0
 
 # Decoupled SS Claim Ages
