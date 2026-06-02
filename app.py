@@ -598,7 +598,7 @@ if 'asset_balances' not in st.session_state:
 if 'policy_df' not in st.session_state:
     st.session_state.policy_df = pd.DataFrame({
         "Asset Category": list(st.session_state.asset_balances.keys()),
-        "Annual Savings Escalator (%)": [0.0, 2.5, 2.5, 0.0, -20.0, 2.5, 0.0, 0.0, 0.0, 0.0],
+        "Annual Savings Escalator (%)": [0.0, 0.0, 2.5, 0.0, -20.0, 2.5, 0.0, 0.0, 0.0, 0.0],
         "Current State": [0, 20000, 30000, 0, 15000, 30000, 0, 0, 8300, 0],
         "Northbrook Grind": [0, 20000, 30000, 0, 15000, 30000, 0, 0, 0, 0]
     })
