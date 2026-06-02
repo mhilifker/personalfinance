@@ -1427,7 +1427,7 @@ if selection == "1. Executive Dashboard":
         fig_d.update_layout(
             barmode='stack', height=210,
             title={'text': f"How fully is your lifestyle funded?<br><span style='font-size:0.78em;color:gray'>Typical path funds {median_funded:.0f}% of target</span>",
-                   'y': 0.97, 'yanchor': 'top'},
+                   'y': 1.2, 'yanchor': 'top'},
             xaxis=dict(range=[0, 100], ticksuffix="%",
                        title=dict(text="Share of simulated futures", standoff=18)),
             yaxis=dict(showticklabels=False),
