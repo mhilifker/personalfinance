@@ -1426,10 +1426,10 @@ if selection == "1. Executive Dashboard":
                                text=f"{band_low:.0f}%", textposition='inside'))
         fig_d.update_layout(
             barmode='stack', height=210,
-            title={'text': f"How fully is your lifestyle funded?<br><span style='font-size:0.78em;color:gray'>Typical path funds {median_funded:.0f}% of target</span>",
-                   'y': 1.2, 'yanchor': 'top'},
+            title={'text': f"How fully is your lifestyle funded?<br><span style='font-size:0.85em;color:gray'>Typical path funds {median_funded:.0f}% of target</span>",
+                   'y': 0.97, 'yanchor': 'top'},
             xaxis=dict(range=[0, 100], ticksuffix="%",
-                       title=dict(text="Share of simulated futures", standoff=18)),
+                       title=dict(text="Share of simulated futures", standoff=22)),
             yaxis=dict(showticklabels=False),
             legend=dict(orientation='h', y=-0.55, x=0.5, xanchor='center',
                         itemwidth=40, font=dict(size=12), tracegroupgap=20,
