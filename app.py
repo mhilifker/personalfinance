@@ -1425,8 +1425,8 @@ if selection == "1. Executive Dashboard":
                                name="Tightened (<85%)", marker_color='#fdae6b',
                                text=f"{band_low:.0f}%", textposition='inside'))
         fig_d.update_layout(
-            barmode='stack', height=210,
-            title={'text': f"How fully is your lifestyle funded?<br><span style='font-size:0.85em;color:gray'>Typical path funds {median_funded:.0f}% of target</span>",
+            barmode='stack', height=180,
+            title={'text': f"How fully is your lifestyle funded?<br><span style='font-size:0.99em;color:gray'>Typical path funds {median_funded:.0f}% of target</span>",
                    'y': 0.97, 'yanchor': 'top'},
             xaxis=dict(range=[0, 100], ticksuffix="%",
                        title=dict(text="Share of simulated futures", standoff=22)),
@@ -1434,7 +1434,7 @@ if selection == "1. Executive Dashboard":
             legend=dict(orientation='h', y=-0.55, x=0.5, xanchor='center',
                         itemwidth=40, font=dict(size=12), tracegroupgap=20,
                         itemsizing='constant'),
-            margin=dict(l=10, r=10, t=95, b=70)
+            margin=dict(l=10, r=10, t=95, b=40)
         )
         st.plotly_chart(fig_d, use_container_width=True)
         st.metric("Typical lifestyle funded (median)", f"{median_funded:.0f}%")
