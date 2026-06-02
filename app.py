@@ -1430,7 +1430,7 @@ if selection == "1. Executive Dashboard":
                     unsafe_allow_html=True)
         fig_d.update_layout(
             barmode='stack', height=230,
-            title=None,
+            title="",
             xaxis=dict(range=[0, 100], ticksuffix="%",
                        title=dict(text="Share of simulated futures", standoff=25)),
             yaxis=dict(showticklabels=False),
