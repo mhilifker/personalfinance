@@ -430,6 +430,7 @@ def dashboard_full_stress_metrics(n_runs, seed):
     path_success = []       # solvent through death
     full_life = []          # also funded >=95% lifestyle
     funded_ratios = []      # achieved real lifestyle / target, per path (for distribution)
+    lifetime_gift_real = []  # total real (2026 $) generational gift per path (distribution)
     # Per-year achieved real (2026 $) lifestyle spend, one row per path. NaN after death so
     # the by-year median reflects only living-household years, not post-death zero spend.
     ret_years_all = [y for y in years if y >= ret_start]
@@ -517,6 +518,8 @@ def dashboard_full_stress_metrics(n_runs, seed):
         ar = sum(life.get(y,0)/dm[y] for y in scored)
         ratio = ar / stgt
         funded_ratios.append(ratio)
+        gift = dd.loc["Actual Generational Drip"]
+        lifetime_gift_real.append(sum(gift.get(y, 0.0)/dm[y] for y in scored))
         # Record per-year achieved real spend (living years only; NaN after death).
         for ci, y in enumerate(ret_years_all):
             if y <= death_yr:
@@ -546,17 +549,125 @@ def dashboard_full_stress_metrics(n_runs, seed):
         spend_p25 = _np.nanpercentile(spend_matrix, 25, axis=0)
         spend_p75 = _np.nanpercentile(spend_matrix, 75, axis=0)
     spend_target = [target_real_map[y] for y in ret_years_all]
+    gift_arr = _np.array(lifetime_gift_real)
+    gift_median = float(_np.median(gift_arr)) if len(gift_arr) else 0.0
+    gift_p10 = float(_np.percentile(gift_arr, 10)) if len(gift_arr) else 0.0
+    gift_p90 = float(_np.percentile(gift_arr, 90)) if len(gift_arr) else 0.0
     return {
         'never_deplete': never_deplete, 'full_lifestyle': full_lifestyle,
         'band_full': band_full, 'band_mid': band_mid, 'band_low': band_low,
         'median_funded': median_funded, 'ages': ages, 'by_age': by_age,
         'funded_ratios': (fr * 100.0).tolist(),
+        'gift_median': gift_median, 'gift_p10': gift_p10, 'gift_p90': gift_p90,
+        'gift_values': gift_arr.tolist(),
         'spend_years': ret_years_all,
         'spend_median': [None if _np.isnan(v) else float(v) for v in spend_median],
         'spend_p25': [None if _np.isnan(v) else float(v) for v in spend_p25],
         'spend_p75': [None if _np.isnan(v) else float(v) for v in spend_p75],
         'spend_target': spend_target,
         'start_age': start,
+    }
+
+
+def mc_bands_for_pages(n_runs, seed):
+    """Lightweight Monte Carlo used by Pages 7 and 8 to show DISTRIBUTIONS rather than a single
+    deterministic path. Reuses the same full-stress engine (valuation conditioning, crisis
+    overlay, EUR bond sleeve, and every enabled stress factor) as the dashboard/Page 12, then
+    returns per-year percentile bands for:
+      - total portfolio balance, REAL 2026 $ (Page 8 fan chart)
+      - the weighted-average effective tax rate (Page 7 tax-rate band)
+    Only these two summary series are collected (not per-account draws), keeping it light."""
+    import numpy as _np
+    years = list(range(2026, 2090)); nN = len(years)
+    inf = st.session_state.inflation_rate / 100.0
+    start = st.session_state.current_age
+
+    common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
+    uh = _np.array([SP500_BY_YEAR[y] for y in common]) / 100.0
+    eh = _np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common]) / 100.0
+    block = int(st.session_state.get('mc_block_len', 5)); nb = len(common) - block + 1
+    um = st.session_state.usd_market_return/100.0 + _np.var(uh)/2
+    em = st.session_state.eur_market_return/100.0 + _np.var(eh)/2
+    bm = st.session_state.bond_mean/100.0; bv = st.session_state.bond_vol/100.0
+    cn = st.session_state.bond_eq_corr; cc = st.session_state.bond_eq_corr_crisis
+    vsu, vse = build_valuation_shift(nN, st.session_state.usd_market_return/100.0, st.session_state.eur_market_return/100.0)
+    base_infl = st.session_state.inflation_rate/100.0
+    infl_vol = st.session_state.mc_infl_vol/100.0; infl_corr = st.session_state.mc_infl_equity_corr
+    fx_vol = st.session_state.mc_fx_vol/100.0; fx_base = st.session_state.fx_rate
+    woff = st.session_state.mc_wife_age_offset
+
+    rng = _np.random.default_rng(seed)
+    real_bal = _np.full((n_runs, nN), _np.nan)
+    tax_rate = _np.full((n_runs, nN), _np.nan)
+    for _run in range(n_runs):
+        idx = []
+        while len(idx) < nN:
+            s = rng.integers(0, nb); idx.extend(range(s, s + block))
+        idx = _np.array(idx[:nN])
+        u = uh[idx]-uh[idx].mean()+um+vsu; e = eh[idx]-eh[idx].mean()+em+vse
+        mu = u.mean(); sd = u.std() or 1e-9; zb = rng.standard_normal(nN); b = _np.empty(nN)
+        for i, r in enumerate(u):
+            z = (r-mu)/sd; c = cc if (z < -1.0 and r < 0) else cn
+            b[i] = bm + bv*(c*z + _np.sqrt(max(0.0,1-c**2))*zb[i])
+        u, e, b = apply_crisis_overlay(u, e, b, rng)
+        sc = {'returns': {years[i]: (float(u[i]), float(e[i])) for i in range(nN)},
+              'bond': {years[i]: float(b[i]) for i in range(nN)}}
+        if st.session_state.mc_stoch_inflation:
+            infl = {}
+            for i, y in enumerate(years):
+                eq_z = (u[i]-mu)/sd
+                infl[y] = max(-0.02, base_infl + infl_corr*eq_z*infl_vol + _np.sqrt(max(0,1-infl_corr**2))*rng.normal(0, infl_vol))
+            sc['inflation'] = infl
+        if st.session_state.mc_stoch_fx:
+            fx = {}; log_lvl = 0.0; kappa = st.session_state.get('mc_fx_reversion', 0.15)
+            for y in years:
+                log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fx_vol); fx[y] = fx_base * _np.exp(log_lvl)
+            sc['fx'] = fx
+        death_yr = 2089
+        if st.session_state.mc_stoch_longevity:
+            d_self = sample_death_age(start, SURV_MALE, rng); d_sp = sample_death_age(start - woff, SURV_FEMALE, rng)
+            sy = 2026 + (d_self - start); py = 2026 + (d_sp - (start - woff))
+            death_yr = min(2089, max(sy, py)); sc['death_year'] = death_yr; sc['_first_death_yr'] = min(sy, py)
+        if st.session_state.mc_ltc_enable:
+            ltc = {}
+            for _p in range(2):
+                if rng.random() < st.session_state.mc_ltc_prob:
+                    onset = 2026 + (int(rng.integers(78,90)) - start)
+                    for kk in range(int(st.session_state.mc_ltc_years)):
+                        if onset+kk <= 2089: ltc[onset+kk] = ltc.get(onset+kk,0)+st.session_state.mc_ltc_cost
+            if ltc: sc['ltc_cost'] = ltc
+        if st.session_state.mc_tax_regime:
+            sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
+        if rng.random() < st.session_state.mc_ss_haircut_prob:
+            sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
+
+        db, _, dtax, _, _ = run_core_simulation(scenario=sc)
+        tot = db.loc['Total Portfolio Balance']
+        # Per-path real discount factors (use realized inflation if stochastic).
+        if 'inflation' in sc:
+            dm = {}; cpi = 1.0
+            for y in years:
+                if y > 2026: cpi *= (1+sc['inflation'][y])
+                dm[y] = cpi
+        else:
+            dm = {y: (1+inf)**(y-2026) for y in years}
+        for i, y in enumerate(years):
+            bal = tot.get(y, _np.nan)
+            real_bal[_run, i] = (bal/dm[y]) if (bal == bal and bal > 0) else (0.0 if bal == bal else _np.nan)
+            if 'Weighted Average' in dtax.index and y in dtax.columns:
+                tr = dtax.loc['Weighted Average', y]
+                tax_rate[_run, i] = tr if tr == tr else _np.nan
+
+    def _pcts(mat):
+        with _np.errstate(all='ignore'):
+            return {p: _np.nanpercentile(mat, p, axis=0) for p in [10, 25, 50, 75, 90]}
+    bal_p = _pcts(real_bal); tax_p = _pcts(tax_rate)
+    return {
+        'years': years,
+        'bal_p10': bal_p[10].tolist(), 'bal_p25': bal_p[25].tolist(), 'bal_p50': bal_p[50].tolist(),
+        'bal_p75': bal_p[75].tolist(), 'bal_p90': bal_p[90].tolist(),
+        'tax_p10': tax_p[10].tolist(), 'tax_p25': tax_p[25].tolist(), 'tax_p50': tax_p[50].tolist(),
+        'tax_p75': tax_p[75].tolist(), 'tax_p90': tax_p[90].tolist(),
     }
 
 
@@ -1205,12 +1316,10 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         t_col = {a: (taxes[a] / draws[a] if draws[a] > 0 else 0.0) for a in asset_rows}
         # SS tax is computed centrally as a household "shadow tax" (irs_shadow_tax_usd) rather
         # than per-asset, so these rows previously displayed 0% even though SS IS taxed. Show each
-        # person's effective SS tax rate = (their share of the taxed shadow tax) / (their benefit).
-        # This must respect the survivor phase: there, only the LARGER benefit is actually received
-        # and taxed, so the tax is attributed to the surviving benefit and the lost one shows 0%.
+        # person's effective SS tax rate. Survivor-aware: in the survivor phase only the LARGER
+        # benefit is received and taxed, so the tax is attributed to it and the lost one shows 0%.
         # The Weighted Average already includes this tax in numerator and denominator -> unchanged.
         if in_survivor_phase:
-            # Only the larger benefit survives; the shadow tax falls entirely on it.
             if ss_m >= ss_s:
                 t_col["Michael's SS"] = (irs_shadow_tax_usd / ss_m) if ss_m > 0 else 0.0
                 t_col["Stephanie's SS"] = 0.0
@@ -1316,11 +1425,16 @@ if selection == "1. Executive Dashboard":
                                name="Tightened (<85%)", marker_color='#fdae6b',
                                text=f"{band_low:.0f}%", textposition='inside'))
         fig_d.update_layout(
-            barmode='stack', height=150,
-            title={'text': f"How fully is your lifestyle funded?<br><span style='font-size:0.78em;color:gray'>Typical path funds {median_funded:.0f}% of target</span>"},
-            xaxis=dict(range=[0, 100], ticksuffix="%", title="Share of simulated futures"),
+            barmode='stack', height=210,
+            title={'text': f"How fully is your lifestyle funded?<br><span style='font-size:0.78em;color:gray'>Typical path funds {median_funded:.0f}% of target</span>",
+                   'y': 0.97, 'yanchor': 'top'},
+            xaxis=dict(range=[0, 100], ticksuffix="%",
+                       title=dict(text="Share of simulated futures", standoff=18)),
             yaxis=dict(showticklabels=False),
-            legend=dict(orientation='h', y=-0.5), margin=dict(l=10, r=10, t=60, b=10)
+            legend=dict(orientation='h', y=-0.55, x=0.5, xanchor='center',
+                        itemwidth=40, font=dict(size=12), tracegroupgap=20,
+                        itemsizing='constant'),
+            margin=dict(l=10, r=10, t=95, b=70)
         )
         st.plotly_chart(fig_d, use_container_width=True)
         st.metric("Typical lifestyle funded (median)", f"{median_funded:.0f}%")
@@ -1343,8 +1457,8 @@ if selection == "1. Executive Dashboard":
         fig_h.update_layout(
             title="Distribution of lifestyle funding across all simulated futures",
             xaxis=dict(title="% of target lifestyle funded", ticksuffix="%", range=[0, 100]),
-            yaxis_title="Number of futures", height=320, bargap=0.02,
-            margin=dict(l=10, r=10, t=50, b=10)
+            yaxis_title="Number of futures", height=340, bargap=0.02,
+            margin=dict(l=10, r=10, t=80, b=10)
         )
         st.plotly_chart(fig_h, use_container_width=True)
         if len(below85) > 0:
@@ -1365,7 +1479,7 @@ if selection == "1. Executive Dashboard":
     fig_age.update_layout(
         title="Chance the money is still there at each age",
         xaxis_title="Age", yaxis=dict(title="Chance money still lasts", range=[0, 101], ticksuffix="%"),
-        height=300, margin=dict(l=10, r=10, t=50, b=10)
+        height=300, margin=dict(l=10, r=10, t=80, b=10)
     )
     st.plotly_chart(fig_age, use_container_width=True)
 
@@ -1399,9 +1513,11 @@ if selection == "1. Executive Dashboard":
                                         line=dict(color='#08519c', width=4),
                                         hovertemplate="%{x}: median $%{y:,.0f}<extra></extra>"))
             fig_sp.update_layout(
-                title="Lifestyle spend: typical achieved vs target (real 2026 $)",
+                title=dict(text="Lifestyle spend: typical achieved vs target (real 2026 $)",
+                           y=0.97, yanchor='top'),
                 xaxis_title="Year", yaxis=dict(title="Annual spend (2026 $)", tickprefix="$"),
-                height=320, legend=dict(orientation='h', y=1.14), margin=dict(l=10, r=10, t=60, b=10)
+                height=360, legend=dict(orientation='h', y=1.02, x=0.5, xanchor='center'),
+                margin=dict(l=10, r=10, t=95, b=10)
             )
             st.plotly_chart(fig_sp, use_container_width=True)
             # Plain-language gap summary.
@@ -1562,9 +1678,26 @@ if selection == "1. Executive Dashboard":
         
         if not df_gift_active.empty:
             st.markdown("**Generational Wealth Transfer Summary**")
+            # Primary figures come from the 400-run stress-tested distribution (same engine as the
+            # gauges above), NOT the single deterministic path -- gifting is the most variable
+            # output across futures, so median + 10th-percentile downside are far more honest.
+            g_med = R.get('gift_median'); g_p10 = R.get('gift_p10'); g_p90 = R.get('gift_p90')
+            if g_med is not None:
+                gm1, gm2, gm3 = st.columns(3)
+                gm1.metric("Typical Lifetime Gift (median, real 2026 $)", f"${g_med:,.0f}")
+                gm2.metric("Downside (10th pctile, real)", f"${g_p10:,.0f}",
+                           help="In a bad 1-in-10 future, lifetime gifting is only this much. Gifting is the residual after lifestyle and guardrails, so it varies far more than spending across futures.")
+                gm3.metric("Upside (90th pctile, real)", f"${g_p90:,.0f}")
+                st.caption(
+                    f"Median lifetime gift across {dash_runs} stress-tested futures is **${g_med:,.0f}** (real 2026 $), "
+                    f"but the spread is wide: a bad path gifts as little as **${g_p10:,.0f}** while a good one reaches "
+                    f"**${g_p90:,.0f}**. Gifting is the first thing the guardrails sacrifice in weak markets. The "
+                    "base-case figure below is a single deterministic projection and sits toward the optimistic end."
+                )
             g1, g2 = st.columns(2)
-            g1.metric("Total Lifetime Gift (Nominal)", f"${df_gift_summary['Cumulative Nominal Gift'].iloc[-1]:,.0f}")
-            g2.metric("Total Lifetime Gift (Real 2026 $)", f"${df_gift_summary['Cumulative Real Gift'].iloc[-1]:,.0f}")
+            g1.metric("Base-Case Lifetime Gift (deterministic, nominal)", f"${df_gift_summary['Cumulative Nominal Gift'].iloc[-1]:,.0f}",
+                      help="A single base-case path with all assumptions at central values -- not stress-tested. The median/downside above are the representative figures.")
+            g2.metric("Base-Case Lifetime Gift (deterministic, real 2026 $)", f"${df_gift_summary['Cumulative Real Gift'].iloc[-1]:,.0f}")
             st.markdown("<br>", unsafe_allow_html=True)
             
     if not df_conts.empty:
@@ -1939,15 +2072,53 @@ elif selection == "7. Cash Flow & Slovenian Drip":
     
     st.markdown("---")
     st.subheader("2. Yearly Effective Tax Rate")
-    
+
+    show_tax_band = st.checkbox(
+        "Overlay Monte Carlo range (10th-90th percentile)", value=False,
+        help="Adds the distribution of your weighted-average effective tax rate across stress-tested "
+             "futures around the deterministic line. The draw tables above stay deterministic (their "
+             "value is the exact mechanics); only this summary rate gets a range, since its uncertainty "
+             "is decision-relevant."
+    )
+
     df_tax_t = df_tax.T
     if start_yr in df_tax_t.index:
         tax_chart_data = df_tax_t.loc[start_yr:].copy()
-        fig_tax = px.line(tax_chart_data, y='Weighted Average', markers=True)
-        fig_tax.layout.yaxis.tickformat = ',.1%'
-        fig_tax.update_layout(xaxis_title="Year", yaxis_title="Effective Tax Rate (%)", showlegend=False)
+        fig_tax = go.Figure()
+        if show_tax_band:
+            tb1, tb2 = st.columns(2)
+            tax_runs = tb1.number_input("Simulations", value=300, min_value=100, max_value=1500, step=100, key="p7_runs")
+            if tb2.button("Run / Refresh Tax Range") or 'p7_bands' not in st.session_state:
+                with st.spinner(f"Running {int(tax_runs)} full-stress paths..."):
+                    st.session_state.p7_bands = mc_bands_for_pages(int(tax_runs), seed=int(st.session_state.get('mc_seed', 42)))
+            T = st.session_state.p7_bands
+            yrs = T['years']
+            # Clip to the retirement window shown on the deterministic chart.
+            keep = [i for i, y in enumerate(yrs) if y >= start_yr]
+            yk = [yrs[i] for i in keep]
+            def col(key): return [T[key][i] for i in keep]
+            fig_tax.add_trace(go.Scatter(x=yk, y=col('tax_p90'), mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+            fig_tax.add_trace(go.Scatter(x=yk, y=col('tax_p10'), mode='lines', line=dict(width=0), fill='tonexty',
+                                         fillcolor='rgba(214,39,40,0.12)', name='10th-90th pct'))
+            fig_tax.add_trace(go.Scatter(x=yk, y=col('tax_p75'), mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+            fig_tax.add_trace(go.Scatter(x=yk, y=col('tax_p25'), mode='lines', line=dict(width=0), fill='tonexty',
+                                         fillcolor='rgba(214,39,40,0.25)', name='25th-75th pct'))
+            fig_tax.add_trace(go.Scatter(x=yk, y=col('tax_p50'), mode='lines', line=dict(color='#d62728', width=2, dash='dot'), name='MC median'))
+        fig_tax.add_trace(go.Scatter(x=tax_chart_data.index, y=tax_chart_data['Weighted Average'],
+                                     mode='lines+markers', line=dict(color='#08519c', width=3), name='Base case'))
+        fig_tax.update_yaxes(tickformat=',.1%')
+        fig_tax.update_layout(xaxis_title="Year", yaxis_title="Effective Tax Rate (%)",
+                              legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
+                              showlegend=show_tax_band, height=420, margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig_tax, use_container_width=True)
-        
+        if show_tax_band:
+            st.caption(
+                "The blue line is the base-case effective tax rate; the red band is its range across "
+                "stress-tested futures (tax-regime drift, varying drawdown sources, and inflation moving "
+                "bracket fills all widen it). A wide band means your effective rate is sensitive to "
+                "conditions you don't control \u2014 useful context for the Roth-conversion and SS-timing decisions."
+            )
+
     st.dataframe(df_tax.style.format("{:.1%}"), use_container_width=True, height=500)
 
     st.markdown("---")
@@ -1985,13 +2156,57 @@ elif selection == "7. Cash Flow & Slovenian Drip":
 elif selection == "8. Yearly Balances (2026-2089)":
     st.header("8. Yearly Balances (2026-2089)")
     df_bal, _, _, _, _ = run_core_simulation()
-    chart_bals = df_bal.drop("Total Portfolio Balance").T
-    fig3 = px.bar(chart_bals, barmode='stack')
-    fig3.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), xaxis_title="", yaxis_title="Balance ($)")
-    st.plotly_chart(fig3, use_container_width=True)
-    st.markdown("---")
-    st.subheader("Detailed Ledger")
-    st.dataframe(df_bal.style.format("${:,.0f}"), use_container_width=True, height=450)
+
+    view_mode = st.radio(
+        "View", ["Deterministic (base-case stack)", "Monte Carlo (percentile fan)"],
+        horizontal=True,
+        help="Deterministic shows the single base-case projection by asset. Monte Carlo shows "
+             "the range of TOTAL real balance across stress-tested futures (10th-90th percentile), "
+             "so you see where your balance could plausibly land at each age, not just one line."
+    )
+
+    if view_mode.startswith("Monte Carlo"):
+        mc1, mc2 = st.columns(2)
+        band_runs = mc1.number_input("Simulations", value=400, min_value=100, max_value=2000, step=100, key="p8_runs")
+        if mc2.button("Run / Refresh Percentile Fan") or 'p8_bands' not in st.session_state:
+            with st.spinner(f"Running {int(band_runs)} full-stress paths..."):
+                st.session_state.p8_bands = mc_bands_for_pages(int(band_runs), seed=int(st.session_state.get('mc_seed', 42)))
+        B = st.session_state.p8_bands
+        yrs = B['years']
+        fig8 = go.Figure()
+        fig8.add_trace(go.Scatter(x=yrs, y=B['bal_p90'], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig8.add_trace(go.Scatter(x=yrs, y=B['bal_p10'], mode='lines', line=dict(width=0), fill='tonexty',
+                                  fillcolor='rgba(31,119,180,0.15)', name='10th-90th percentile'))
+        fig8.add_trace(go.Scatter(x=yrs, y=B['bal_p75'], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig8.add_trace(go.Scatter(x=yrs, y=B['bal_p25'], mode='lines', line=dict(width=0), fill='tonexty',
+                                  fillcolor='rgba(31,119,180,0.30)', name='25th-75th percentile'))
+        fig8.add_trace(go.Scatter(x=yrs, y=B['bal_p50'], mode='lines', line=dict(color='red', width=3), name='Median'))
+        fig8.update_layout(
+            title=dict(text="Total Real Portfolio Balance Across Stress-Tested Futures (2026 $)", y=0.97, yanchor='top'),
+            xaxis_title="Year", yaxis=dict(title="Real Portfolio Value (2026 $)", tickprefix="$"),
+            legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
+            hovermode="x unified", height=460, margin=dict(l=10, r=10, t=80, b=10)
+        )
+        st.plotly_chart(fig8, use_container_width=True)
+        st.caption(
+            "Each band is the range of your TOTAL portfolio balance (real 2026 $) across the simulated "
+            "futures at each age \u2014 the red line is the typical (median) path, the dark band the middle "
+            "half, the light band the 10th-90th percentile. A band that stays well above zero late in life "
+            "means the plan is robust; one that dips toward zero in the lower percentiles flags depletion "
+            "risk in bad sequences. This is the honest range; the deterministic view shows only one line "
+            "through the middle. Uses the same engine as the dashboard and Page 12."
+        )
+        st.markdown("---")
+        st.subheader("Detailed Ledger (base-case deterministic)")
+        st.dataframe(df_bal.style.format("${:,.0f}"), use_container_width=True, height=450)
+    else:
+        chart_bals = df_bal.drop("Total Portfolio Balance").T
+        fig3 = px.bar(chart_bals, barmode='stack')
+        fig3.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5, title=""), xaxis_title="", yaxis_title="Balance ($)")
+        st.plotly_chart(fig3, use_container_width=True)
+        st.markdown("---")
+        st.subheader("Detailed Ledger")
+        st.dataframe(df_bal.style.format("${:,.0f}"), use_container_width=True, height=450)
 
 # -----------------------------------------------------------------------------
 # 9. TAX TORPEDO OPTIMIZER (GRID SEARCH)
