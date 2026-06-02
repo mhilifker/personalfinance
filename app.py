@@ -27,6 +27,9 @@ if 'enable_smoothing' not in st.session_state: st.session_state.enable_smoothing
 if 'target_early_draw' not in st.session_state: st.session_state.target_early_draw = 210000
 if 'gift_start_age' not in st.session_state: st.session_state.gift_start_age = 58
 if 'gift_end_age' not in st.session_state: st.session_state.gift_end_age = 83
+# Master on/off for the dynamic generational gifting drip. When False, the model does NOT
+# gift surplus away (it lets the portfolio accumulate), regardless of the age window.
+if 'gifting_enable' not in st.session_state: st.session_state.gifting_enable = True
 
 # Tax Assumptions
 if 'tax_roth' not in st.session_state: st.session_state.tax_roth = 25.0
@@ -116,13 +119,17 @@ if 'mc_block_len' not in st.session_state: st.session_state.mc_block_len = 5
 # or as the raw ARITHMETIC mean of annual returns (realized compounding is then lower).
 if 'mc_mean_type' not in st.session_state: st.session_state.mc_mean_type = "Compound (CAGR) target"
 # Explicit lifetime gifting goal (real 2026 $) to measure "gift success" against in MC.
-if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 750000
+if 'mc_gift_goal' not in st.session_state: st.session_state.mc_gift_goal = 1500000
 # Multi-factor stress toggles and parameters for the Monte Carlo.
 if 'mc_stoch_inflation' not in st.session_state: st.session_state.mc_stoch_inflation = True
 if 'mc_infl_vol' not in st.session_state: st.session_state.mc_infl_vol = 1.5
 if 'mc_infl_equity_corr' not in st.session_state: st.session_state.mc_infl_equity_corr = -0.35
 if 'mc_stoch_fx' not in st.session_state: st.session_state.mc_stoch_fx = True
 if 'mc_fx_vol' not in st.session_state: st.session_state.mc_fx_vol = 9.0
+# FX mean-reversion speed toward PPP (the base rate). 0 = pure random walk (unrealistic over
+# decades; lets FX drift to absurd multiples); ~0.15 pulls the log-level ~15% back to parity
+# each year, matching the empirical long-horizon mean reversion of real exchange rates.
+if 'mc_fx_reversion' not in st.session_state: st.session_state.mc_fx_reversion = 0.15
 if 'mc_stoch_longevity' not in st.session_state: st.session_state.mc_stoch_longevity = True
 if 'mc_wife_age_offset' not in st.session_state: st.session_state.mc_wife_age_offset = 2
 if 'mc_ltc_enable' not in st.session_state: st.session_state.mc_ltc_enable = True
@@ -143,8 +150,8 @@ if 'mc_cape_implied_eur' not in st.session_state: st.session_state.mc_cape_impli
 if 'mc_reversion_years' not in st.session_state: st.session_state.mc_reversion_years = 12
 if 'mc_valuation_strength' not in st.session_state: st.session_state.mc_valuation_strength = 1.0
 if 'mc_crisis_enable' not in st.session_state: st.session_state.mc_crisis_enable = True
-if 'mc_crisis_freq' not in st.session_state: st.session_state.mc_crisis_freq = 0.15
-if 'mc_crisis_persist' not in st.session_state: st.session_state.mc_crisis_persist = 0.45
+if 'mc_crisis_freq' not in st.session_state: st.session_state.mc_crisis_freq = 0.05
+if 'mc_crisis_persist' not in st.session_state: st.session_state.mc_crisis_persist = 0.20
 if 'mc_crisis_usd_mean' not in st.session_state: st.session_state.mc_crisis_usd_mean = -22.0
 if 'mc_crisis_vol' not in st.session_state: st.session_state.mc_crisis_vol = 22.0
 if 'mc_crisis_eur_drag' not in st.session_state: st.session_state.mc_crisis_eur_drag = 0.90
@@ -237,8 +244,8 @@ def apply_crisis_overlay(usd, eur, bond, rng):
     import numpy as _np
     if not st.session_state.get('mc_crisis_enable', False):
         return usd, eur, bond
-    cr_freq = st.session_state.get('mc_crisis_freq', 0.15)
-    cr_persist = st.session_state.get('mc_crisis_persist', 0.45)
+    cr_freq = st.session_state.get('mc_crisis_freq', 0.05)
+    cr_persist = st.session_state.get('mc_crisis_persist', 0.20)
     cr_entry = ((1 - cr_persist) * cr_freq / (1 - cr_freq)) if cr_freq < 1 else 1.0
     cr_usd_m = st.session_state.get('mc_crisis_usd_mean', -22.0)/100.0
     cr_vol = st.session_state.get('mc_crisis_vol', 22.0)/100.0
@@ -379,8 +386,12 @@ def dashboard_full_stress_metrics(n_runs, seed):
                 infl[y] = max(-0.02, base_infl + infl_corr*eq_z*infl_vol + _np.sqrt(max(0,1-infl_corr**2))*rng.normal(0, infl_vol))
             sc['inflation'] = infl
         if st.session_state.mc_stoch_fx:
-            fx = {}; lvl = fx_base
-            for y in years: lvl *= _np.exp(rng.normal(0, fx_vol)); fx[y] = lvl
+            fx = {}; log_lvl = 0.0
+            kappa = st.session_state.get('mc_fx_reversion', 0.15)
+            for y in years:
+                # Ornstein-Uhlenbeck in log space: pull back toward parity (0), then shock.
+                log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fx_vol)
+                fx[y] = fx_base * _np.exp(log_lvl)
             sc['fx'] = fx
         death_yr = 2089
         if st.session_state.mc_stoch_longevity:
@@ -422,7 +433,17 @@ def dashboard_full_stress_metrics(n_runs, seed):
         else:
             dm = {y: (1+inf)**(y-2026) for y in years}
         scored = [y for y in ret_years if y <= death_yr]
-        stgt = sum(target_real_map[y] for y in scored) or 1.0
+        # Survivor-aware target: after the first death the household SHOULD spend less (the
+        # survivor expense ratio), so scoring achieved spend against the full couple's target
+        # would wrongly count the intentional reduction as a shortfall. Scale the target down
+        # in survivor years to match what the household actually needs.
+        first_dy = sc.get('_first_death_yr', None)
+        surv_on = st.session_state.survivor_enable and (first_dy is not None)
+        sratio = st.session_state.survivor_expense_ratio if surv_on else 1.0
+        def _adj_target(y):
+            base = target_real_map[y]
+            return base * sratio if (surv_on and y > first_dy) else base
+        stgt = sum(_adj_target(y) for y in scored) or 1.0
         life = dd.loc["Actual Lifestyle Spend"]
         ar = sum(life.get(y,0)/dm[y] for y in scored)
         ratio = ar / stgt
@@ -834,9 +855,9 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         # return (usd_yr_return) elsewhere; only this forward-looking gift sizing is
         # decoupled, which removes the single-year gift jumpiness in Monte Carlo paths.
         base_gift_usd = 0
-        if st.session_state.gift_start_age <= age <= st.session_state.gift_end_age:
+        if st.session_state.gifting_enable and st.session_state.gift_start_age <= age <= st.session_state.gift_end_age:
             plan_return = st.session_state.usd_market_return / 100.0
-            n_total = 83 - age
+            n_total = 100 - age
             approx_annual_draw = max(0, target_lifestyle_usd - net_ss_usd)
             
             if plan_return == i_rate:
@@ -854,7 +875,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
             n_rem_gifts = st.session_state.gift_end_age - age + 1
             if n_rem_gifts > 0 and plan_return > 0:
                 fvifa = (((1+plan_return)**n_rem_gifts) - 1) / plan_return
-                growth_after_gifts = (1+plan_return)**(83 - st.session_state.gift_end_age)
+                growth_after_gifts = (1+plan_return)**(100 - st.session_state.gift_end_age)
                 base_gift_usd = remaining_gift_fv_needed / (fvifa * growth_after_gifts)
                 
         # 3. Guardrails Logic
@@ -1959,10 +1980,12 @@ elif selection == "11. Longevity Optimizer (Guardrails)":
     
     st.markdown("---")
     st.subheader("3. Dynamic Gifting Calibration")
-    st.markdown("Every year, the engine projects what your Terminal Portfolio Value at Age 83 *would be* if you stopped gifting today. It targets gifting a total equivalent to your chosen percentage of that terminal value.")
-    st.session_state.dynamic_gift_pct = st.number_input("Target Lifetime Gift Value (% of Projected Terminal Portfolio)", value=st.session_state.dynamic_gift_pct, step=5.0)
-    st.session_state.gift_start_age = st.number_input("Age to Start Gifting", value=st.session_state.gift_start_age, step=1)
-    st.session_state.gift_end_age = st.number_input("Age to End Gifting", value=st.session_state.gift_end_age, step=1)
+    st.markdown("Every year, the engine projects what your Terminal Portfolio Value at Age 100 *would be* if you stopped gifting today. It targets gifting a total equivalent to your chosen percentage of that terminal value.")
+    st.session_state.gifting_enable = st.toggle("Enable Generational Gifting", value=st.session_state.gifting_enable,
+                                                help="Off = the model never gifts surplus away; the portfolio accumulates instead. Turn off to model a pure no-gifting plan.")
+    st.session_state.dynamic_gift_pct = st.number_input("Target Lifetime Gift Value (% of Projected Terminal Portfolio)", value=st.session_state.dynamic_gift_pct, step=5.0, disabled=not st.session_state.gifting_enable)
+    st.session_state.gift_start_age = st.number_input("Age to Start Gifting", value=st.session_state.gift_start_age, step=1, disabled=not st.session_state.gifting_enable)
+    st.session_state.gift_end_age = st.number_input("Age to End Gifting", value=st.session_state.gift_end_age, step=1, disabled=not st.session_state.gifting_enable)
 
 # -----------------------------------------------------------------------------
 # 12. MONTE CARLO SIMULATION
@@ -2015,7 +2038,8 @@ elif selection == "12. Monte Carlo Simulation":
             st.session_state.mc_infl_vol = st.number_input("Inflation volatility (std dev %)", value=st.session_state.mc_infl_vol, step=0.25)
             st.session_state.mc_infl_equity_corr = st.number_input("Inflation/equity correlation", value=st.session_state.mc_infl_equity_corr, min_value=-1.0, max_value=1.0, step=0.05, help="Negative = high inflation tends to coincide with bad equity years (stagflation risk).")
             st.session_state.mc_stoch_fx = st.checkbox("Stochastic EUR/USD", value=st.session_state.mc_stoch_fx)
-            st.session_state.mc_fx_vol = st.number_input("FX annual volatility (%)", value=st.session_state.mc_fx_vol, step=1.0, help="USD-funding cost of euro spending follows a random walk with this annual vol.")
+            st.session_state.mc_fx_vol = st.number_input("FX annual volatility (%)", value=st.session_state.mc_fx_vol, step=1.0, help="USD-funding cost of euro spending follows a mean-reverting process with this annual vol.")
+            st.session_state.mc_fx_reversion = st.number_input("FX mean-reversion speed", value=st.session_state.mc_fx_reversion, min_value=0.0, max_value=0.9, step=0.05, help="0 = pure random walk (FX can drift to absurd multiples over decades, overstating currency risk). ~0.15 pulls the rate back toward today's parity each year, matching how real exchange rates revert toward purchasing-power parity over long horizons.")
             st.session_state.mc_stoch_longevity = st.checkbox("Stochastic longevity (SSA tables)", value=st.session_state.mc_stoch_longevity)
             st.session_state.mc_wife_age_offset = st.number_input("Spouse age offset (you minus spouse)", value=st.session_state.mc_wife_age_offset, step=1, help="Used to age the second life. Female table applied to spouse, male to you.")
             st.session_state.survivor_enable = st.checkbox("Survivor scenario (model first death)", value=st.session_state.survivor_enable, help="After the first death: SS drops to the larger benefit, spending falls to the survivor ratio, and the survivor files single (widow's penalty). Requires stochastic longevity to generate first-death years.")
@@ -2080,8 +2104,8 @@ elif selection == "12. Monte Carlo Simulation":
             st.session_state.mc_valuation_strength = st.slider("Conditioning strength", 0.0, 1.0, value=st.session_state.mc_valuation_strength, step=0.1, help="0 = ignore valuation (full long-run mean); 1 = full CAPE conditioning. Your conviction dial.")
         with v2:
             st.session_state.mc_crisis_enable = st.checkbox("Crisis regime overlay", value=st.session_state.mc_crisis_enable)
-            st.session_state.mc_crisis_freq = st.number_input("Crisis year frequency", value=st.session_state.mc_crisis_freq, min_value=0.0, max_value=0.5, step=0.05, help="Long-run share of years in the crisis state (~0.15 historically).")
-            st.session_state.mc_crisis_persist = st.number_input("Crisis persistence", value=st.session_state.mc_crisis_persist, min_value=0.0, max_value=0.95, step=0.05, help="P(stay in crisis next year | in crisis). Higher = longer, clustered bear markets.")
+            st.session_state.mc_crisis_freq = st.number_input("Crisis year frequency", value=st.session_state.mc_crisis_freq, min_value=0.0, max_value=0.5, step=0.01, help="Long-run share of years in the crisis state. ~0.05 keeps the worst 15-yr window near historical experience; higher values stress-test beyond history (but >0.10 produces decade-long crashes worse than any on record).")
+            st.session_state.mc_crisis_persist = st.number_input("Crisis persistence", value=st.session_state.mc_crisis_persist, min_value=0.0, max_value=0.95, step=0.05, help="P(stay in crisis next year | in crisis). Higher = longer, clustered bear markets. Above ~0.3 crises cluster into implausibly long depressions.")
             st.session_state.mc_crisis_usd_mean = st.number_input("Crisis-year USD mean (%)", value=st.session_state.mc_crisis_usd_mean, step=2.0)
             st.session_state.mc_crisis_eur_drag = st.number_input("EUR co-movement in crisis", value=st.session_state.mc_crisis_eur_drag, min_value=0.0, max_value=1.0, step=0.05, help="1.0 = EUR sleeve fully mirrors the USD crisis shock (correlations -> 1).")
 
@@ -2205,10 +2229,11 @@ elif selection == "12. Monte Carlo Simulation":
             # FX volatility neither helps nor hurts on average (a -0.5 sigma^2 drift would
             # have made most paths end with cheaper euros, biasing FX to look beneficial).
             if st.session_state.mc_stoch_fx:
-                fx = {}; lvl = fx_base
+                fx = {}; log_lvl = 0.0
+                kappa = st.session_state.get('mc_fx_reversion', 0.15)
                 for y in years:
-                    lvl *= np.exp(rng.normal(0, fx_vol))
-                    fx[y] = lvl
+                    log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fx_vol)
+                    fx[y] = fx_base * np.exp(log_lvl)
                 sc['fx'] = fx
             # Longevity: draw both death ages; spending stops after the later death.
             if st.session_state.mc_stoch_longevity:
@@ -2688,9 +2713,10 @@ elif selection == "12. Monte Carlo Simulation":
                     infl[y] = max(-0.02, t_inf + ic*z*iv + np.sqrt(max(0,1-ic**2))*rng.normal(0,iv))
                 sc['inflation'] = infl
             if 'fx' in flags:
-                fxv = st.session_state.mc_fx_vol/100.0; lvl = st.session_state.fx_rate; fx = {}
+                fxv = st.session_state.mc_fx_vol/100.0; fxb = st.session_state.fx_rate; fx = {}
+                kappa = st.session_state.get('mc_fx_reversion', 0.15); log_lvl = 0.0
                 for y in t_years:
-                    lvl *= np.exp(rng.normal(0, fxv)); fx[y] = lvl
+                    log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fxv); fx[y] = fxb * np.exp(log_lvl)
                 sc['fx'] = fx
             if 'longevity' in flags:
                 ds = sample_death_age(t_start, SURV_MALE, rng)
@@ -2852,9 +2878,10 @@ elif selection == "12. Monte Carlo Simulation":
                     infl[y] = max(-0.02, im_inf + ic*((usd[i]-em)/es)*iv + np.sqrt(max(0,1-ic**2))*rng.normal(0,iv))
                 sc['inflation'] = infl
             if 'fx' in flags:
-                fxv = st.session_state.mc_fx_vol/100.0; lvl = st.session_state.fx_rate; fx = {}
+                fxv = st.session_state.mc_fx_vol/100.0; fxb = st.session_state.fx_rate; fx = {}
+                kappa = st.session_state.get('mc_fx_reversion', 0.15); log_lvl = 0.0
                 for y in im_years:
-                    lvl *= np.exp(rng.normal(0, fxv)); fx[y] = lvl
+                    log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fxv); fx[y] = fxb * np.exp(log_lvl)
                 sc['fx'] = fx
             if 'ltc' in flags:
                 ltc = {}
