@@ -579,6 +579,16 @@ if 'bond_mean' not in st.session_state: st.session_state.bond_mean = 3.0        
 if 'bond_vol' not in st.session_state: st.session_state.bond_vol = 5.5             # EUR bond annual vol %
 if 'bond_eq_corr' not in st.session_state: st.session_state.bond_eq_corr = 0.15    # normal-year bond/equity corr
 if 'bond_eq_corr_crisis' not in st.session_state: st.session_state.bond_eq_corr_crisis = 0.65  # crisis-year corr
+# Inflation-linked bond sleeve (a STATIC fraction of the bond allocation, NOT dynamically
+# triggered by high inflation -- the protection only works if held continuously, since by
+# the time inflation is visibly high, linkers have already repriced). The linker portion's
+# return is modeled as a real yield PLUS the year's realized inflation, so it mechanically
+# tracks whatever inflation path the simulation generates: it preserves real value in
+# high-inflation years (when nominal bonds erode) and earns its modest real yield as a mild
+# drag in calm years. linker_frac is the share of the bond sleeve held in linkers.
+if 'linker_enable' not in st.session_state: st.session_state.linker_enable = True
+if 'linker_frac' not in st.session_state: st.session_state.linker_frac = 0.50      # share of bond sleeve in linkers
+if 'linker_real_yield' not in st.session_state: st.session_state.linker_real_yield = 1.0  # real yield % (e.g. euro linker ~1%)
 
 # Centralized Asset Balances 
 if 'asset_balances' not in st.session_state:
@@ -796,6 +806,17 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
             usd_yr_return, eur_yr_return, bond_return = sc_returns[yr][0], sc_returns[yr][1], sc_returns[yr][2]
         if sc_bond is not None and yr in sc_bond:
             bond_return = sc_bond[yr]
+
+        # Inflation-linked bond sleeve (static fraction). The linker portion returns its real
+        # yield plus THIS YEAR'S realized inflation (i_rate), so it holds real value exactly
+        # when inflation spikes -- the honest, always-on hedge. The nominal portion keeps the
+        # drawn/assumed nominal bond return. This is NOT regime-switched: the same linker
+        # fraction applies every year, so the model pays the calm-year drag and reaps the
+        # high-inflation protection, showing both sides of the tradeoff.
+        if st.session_state.get('linker_enable', False):
+            lf = st.session_state.get('linker_frac', 0.0)
+            linker_return = st.session_state.get('linker_real_yield', 1.0) / 100.0 + i_rate
+            bond_return = (1 - lf) * bond_return + lf * linker_return
 
         # Equity weight for the year. Allocation-based glide (preferred): linearly shift the
         # equity weight from glide_eq_start to glide_eq_end across the de-risking window.
@@ -2031,6 +2052,26 @@ elif selection == "10. Institutional Stress Testing":
     st.session_state.bond_vol = b2.number_input("EUR Bond Vol (%)", value=st.session_state.bond_vol, step=0.5, format="%.2f")
     st.session_state.bond_eq_corr = b3.number_input("Bond/Equity Corr (normal)", value=st.session_state.bond_eq_corr, min_value=-1.0, max_value=1.0, step=0.05, format="%.2f")
     st.session_state.bond_eq_corr_crisis = b4.number_input("Bond/Equity Corr (crisis)", value=st.session_state.bond_eq_corr_crisis, min_value=-1.0, max_value=1.0, step=0.05, format="%.2f", help="In equity-crash years bonds tend to fall too (2022); this higher correlation means de-risking is not a free hedge in exactly the bad years.")
+
+    st.markdown("**Inflation-Linked Bond Sleeve (static hedge)** — hold a fixed share of the bond sleeve in inflation-linked bonds (euro linkers / TIPS). Held *continuously*, not switched on when inflation rises — the protection only works if you already own it before the shock, since linkers reprice the moment inflation becomes visible. The linker portion earns a real yield plus realized inflation, so it preserves purchasing power in high-inflation years and costs a small drag in calm ones.")
+    il1, il2, il3 = st.columns(3)
+    st.session_state.linker_enable = il1.toggle("Hold Inflation-Linked Bonds", value=st.session_state.linker_enable,
+                                                help="Static allocation, applied every year. Off = the whole bond sleeve is nominal (most exposed to inflation).")
+    st.session_state.linker_frac = il2.number_input("Linker Share of Bond Sleeve", value=st.session_state.linker_frac, min_value=0.0, max_value=1.0, step=0.05, format="%.2f",
+                                                    help="Fraction of the bond allocation held in inflation-linked bonds. The rest stays nominal. Sweep this and re-run Page 14 to see how much it shrinks inflation's swing.", disabled=not st.session_state.linker_enable)
+    st.session_state.linker_real_yield = il3.number_input("Linker Real Yield (%)", value=st.session_state.linker_real_yield, step=0.25, format="%.2f",
+                                                          help="The real (above-inflation) yield linkers earn. Euro-area linkers have recently been ~0.5-1.5% real. Linker nominal return each year = this + that year's realized inflation.", disabled=not st.session_state.linker_enable)
+    if st.session_state.linker_enable:
+        _bm = st.session_state.bond_mean; _lf = st.session_state.linker_frac
+        _ly = st.session_state.linker_real_yield; _inf = st.session_state.inflation_rate
+        _blended_calm = (1 - _lf) * _bm + _lf * (_ly + _inf)
+        st.caption(
+            f"At {_lf:.0%} linkers (real yield {_ly:.1f}%), in a *normal* {_inf:.1f}%-inflation year the blended "
+            f"bond sleeve returns ~{_blended_calm:.1f}% vs {_bm:.1f}% all-nominal "
+            f"({'a slight drag' if _blended_calm < _bm else 'roughly even'}). In a high-inflation year the linker "
+            f"portion rises with inflation while the nominal portion erodes — that asymmetry is the hedge. "
+            f"Test it: sweep the inflation factor on Page 14 with this on vs off."
+        )
     if st.session_state.glide_enable and st.session_state.glide_alloc_mode:
         st.info(
             f"**Status:** Allocation glide active. Equity weight shifts from "
