@@ -1424,6 +1424,7 @@ if selection == "1. Executive Dashboard":
         fig_d.add_trace(go.Bar(x=[band_low], y=["Lifestyle"], orientation='h',
                                name="Tightened (<85%)", marker_color='#fdae6b',
                                text=f"{band_low:.0f}%", textposition='inside'))
+        
     st.markdown("**How fully is your lifestyle funded?**  \n"
                     f"<span style='color:gray;font-size:0.9em'>Typical path funds {median_funded:.0f}% of target</span>",
                     unsafe_allow_html=True)
