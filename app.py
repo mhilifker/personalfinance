@@ -166,11 +166,11 @@ if 'mc_ltc_years' not in st.session_state: st.session_state.mc_ltc_years = 3
 if 'mc_tax_regime' not in st.session_state: st.session_state.mc_tax_regime = True
 if 'mc_tax_vol' not in st.session_state: st.session_state.mc_tax_vol = 0.15
 if 'mc_ss_haircut_prob' not in st.session_state: st.session_state.mc_ss_haircut_prob = 0.50
-if 'mc_ss_haircut_size' not in st.session_state: st.session_state.mc_ss_haircut_size = 0.20
+if 'mc_ss_haircut_size' not in st.session_state: st.session_state.mc_ss_haircut_size = 0.15
 
 # Valuation conditioning (CAPE -> forward return) and the crisis-regime overlay. These must
 # be initialized at module scope: the Monte Carlo UI widgets read them directly, and the
-# shared helpers (build_valuation_shift / apply_crisis_overlay) reference them on every page.
+# shared helpers (build_valuation_shift / apply_crisis_overlay) reference them on every page
 if 'mc_valuation_enable' not in st.session_state: st.session_state.mc_valuation_enable = True
 if 'mc_cape_implied_usd' not in st.session_state: st.session_state.mc_cape_implied_usd = 3.0
 if 'mc_cape_implied_eur' not in st.session_state: st.session_state.mc_cape_implied_eur = 5.0
@@ -2208,8 +2208,8 @@ elif selection == "12. Monte Carlo Simulation":
             st.session_state.mc_ltc_years = st.number_input("LTC duration (years)", value=st.session_state.mc_ltc_years, step=1)
             st.session_state.mc_tax_regime = st.checkbox("Tax-regime uncertainty", value=st.session_state.mc_tax_regime)
             st.session_state.mc_tax_vol = st.number_input("Tax-rate drift (std dev, fraction)", value=st.session_state.mc_tax_vol, step=0.05, help="A path-level multiplier on all tax rates, e.g. 0.15 = +/-15% rate uncertainty.")
-            st.session_state.mc_ss_haircut_prob = st.number_input("SS benefit-cut probability", value=st.session_state.mc_ss_haircut_prob, min_value=0.0, max_value=1.0, step=0.05, help="Chance the SS trust-fund shortfall triggers a benefit cut on your timeline.")
-            st.session_state.mc_ss_haircut_size = st.number_input("SS benefit-cut size", value=st.session_state.mc_ss_haircut_size, min_value=0.0, max_value=1.0, step=0.05)
+            st.session_state.mc_ss_haircut_prob = st.number_input("Incremental SS benefit-cut probability", value=st.session_state.mc_ss_haircut_prob, min_value=0.0, max_value=1.0, step=0.05, help="Chance the SS trust-fund shortfall triggers a benefit cut on your timeline.")
+            st.session_state.mc_ss_haircut_size = st.number_input("Incremental SS benefit-cut size", value=st.session_state.mc_ss_haircut_size, min_value=0.0, max_value=1.0, step=0.05)
 
     m1, m2, m3 = st.columns(3)
     st.session_state.mc_runs = m1.number_input("Number of Simulations", value=st.session_state.mc_runs, min_value=100, max_value=5000, step=100)
