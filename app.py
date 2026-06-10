@@ -131,7 +131,20 @@ if 'sorr_start_yr' not in st.session_state: st.session_state.sorr_start_yr = 204
 if 'sorr_duration' not in st.session_state: st.session_state.sorr_duration = 2
 if 'sorr_return' not in st.session_state: st.session_state.sorr_return = -15.0
 if 'fx_enable' not in st.session_state: st.session_state.fx_enable = True
-if 'fx_rate' not in st.session_state: st.session_state.fx_rate = 1.30
+# fx_rate is the EUR/USD SPOT rate (USD per EUR). Spending is denominated in euros via
+# the cost-of-living ratio below; the spot rate only prices currency crossings, so a
+# STRONGER euro (higher rate) is now correctly adverse for the USD-heavy portfolio.
+if 'fx_rate' not in st.session_state: st.session_state.fx_rate = 1.15
+# Slovenia cost-of-living ratio: euros needed per $1 of US-equivalent lifestyle (the
+# explicit PPP discount, separated from the exchange rate it used to be conflated with).
+if 'sl_col_ratio' not in st.session_state: st.session_state.sl_col_ratio = 0.77
+# Tax engine and Tier-1/Tier-2 fix toggles
+if 'use_progressive_tax' not in st.session_state: st.session_state.use_progressive_tax = True
+if 'roth_first' not in st.session_state: st.session_state.roth_first = True
+if 'ibkr_lot_aging' not in st.session_state: st.session_state.ibkr_lot_aging = True
+if 'model_div_tax' not in st.session_state: st.session_state.model_div_tax = True
+if 'div_yield' not in st.session_state: st.session_state.div_yield = 1.7
+if 'great_reset_mode' not in st.session_state: st.session_state.great_reset_mode = "Sweep at retirement (earnings taxed + 10% penalty if under 59½)"
 
 # Monte Carlo parameters
 if 'mc_runs' not in st.session_state: st.session_state.mc_runs = 1000
@@ -332,338 +345,342 @@ def apply_crisis_overlay(usd, eur, bond, rng):
     return u, e, b
 
 
-def score_joint_success_for_ss(n_runs, seed, m_age, s_age):
-    """Monte Carlo joint-success rate (never deplete + full lifestyle + hit gift goal) for a
-    given pair of SS claim ages. Uses the same bootstrap + valuation + crisis + bond engine
-    as the main simulation, with common random numbers (fixed seed) so different claim-age
-    pairs are compared on identical simulated markets. Used by the SS claim-age optimizer."""
-    import numpy as _np
-    years = list(range(2026, 2090)); nN = len(years)
-    inf = st.session_state.inflation_rate / 100.0
-    start = st.session_state.current_age
-    ret_start = 2026 + (st.session_state.ret_age - st.session_state.current_age)
-    ret_years = [y for y in years if y >= ret_start]
-    gift_goal = float(st.session_state.get('mc_gift_goal', 500000))
-    def _tgt(a):
-        return st.session_state.spend_golden if a < 70 else (st.session_state.spend_middle if a < 85 else st.session_state.spend_wind)
-    tmap = {y: _tgt(start + (y - 2026)) for y in ret_years}
-    total_tgt = sum(tmap.values()) or 1.0
+# -----------------------------------------------------------------------------
+# SHARED MONTE CARLO MACHINERY (single source of truth)
+# Every Monte-Carlo-based tool (dashboard gauges, Pages 7/8 bands, Page 12, the
+# tornado, the interaction matrix, the SS claim-age optimizer, and the Roth
+# ladder optimizer) builds market paths, stress scenarios, discounting, and
+# joint-success scoring through THESE helpers. Previously each tool carried its
+# own near-copy of this code and they had already diverged (e.g. only the
+# dashboard survivor-adjusted the lifestyle target). One implementation means
+# one set of semantics everywhere.
+# -----------------------------------------------------------------------------
+MC_YEARS = list(range(2026, 2090))
 
+
+def _paired_history():
+    """Paired calendar years present in BOTH the US and EUR return series."""
     common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
-    uh = _np.array([SP500_BY_YEAR[y] for y in common]) / 100.0
-    eh = _np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common]) / 100.0
-    block = int(st.session_state.get('mc_block_len', 5)); nb = len(common) - block + 1
-    um = st.session_state.usd_market_return/100.0 + _np.var(uh)/2
-    em = st.session_state.eur_market_return/100.0 + _np.var(eh)/2
-    bm = st.session_state.bond_mean/100.0; bv = st.session_state.bond_vol/100.0
-    cn = st.session_state.bond_eq_corr; cc = st.session_state.bond_eq_corr_crisis
-    vsu, vse = build_valuation_shift(nN, st.session_state.usd_market_return/100.0, st.session_state.eur_market_return/100.0)
+    uh = np.array([SP500_BY_YEAR[y] for y in common]) / 100.0
+    eh = np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common]) / 100.0
+    return common, uh, eh
 
-    rng = _np.random.default_rng(seed); ok = 0
+
+def draw_bond_path(u, rng):
+    """EUR bond returns correlated with the equity path; correlation jumps to the
+    crisis value in sharp-drawdown years (the 2022 lesson: bonds fall with stocks
+    on rate/inflation shocks, so de-risking is not a free hedge in the bad years)."""
+    u = np.asarray(u, dtype=float)
+    bm = st.session_state.bond_mean / 100.0
+    bv = st.session_state.bond_vol / 100.0
+    cn = st.session_state.bond_eq_corr
+    cc = st.session_state.bond_eq_corr_crisis
+    mu = u.mean()
+    sd = u.std() or 1e-9
+    zb = rng.standard_normal(len(u))
+    b = np.empty(len(u))
+    for i, r in enumerate(u):
+        z = (r - mu) / sd
+        c = cc if (z < -1.0 and r < 0) else cn
+        b[i] = bm + bv * (c * z + np.sqrt(max(0.0, 1 - c ** 2)) * zb[i])
+    return b
+
+
+def make_bootstrap_paths(rng, n_years=None):
+    """One paired block-bootstrap path (USD equity, EUR equity, EUR bond), with
+    valuation conditioning and the crisis overlay applied.
+
+    Recentering uses the FULL-HISTORY mean (`uh.mean()`), not each draw's own
+    sample mean. Recentering per-draw pinned every simulated 64-year history to
+    realize EXACTLY the assumed average return, deleting long-run-mean
+    uncertainty -- one of the largest sources of terminal-wealth dispersion --
+    and biasing success rates optimistic. With full-history recentering, paths
+    retain natural variation in their realized 64-year averages.
+    Honors mc_mean_type: under a Compound (CAGR) target, volatility drag is
+    added back to the arithmetic center."""
+    n_years = n_years or len(MC_YEARS)
+    common, uh, eh = _paired_history()
+    block = int(st.session_state.get('mc_block_len', 5))
+    nb = len(common) - block + 1
+    compound = str(st.session_state.get('mc_mean_type', "Compound (CAGR) target")).startswith("Compound")
+    um = st.session_state.usd_market_return / 100.0 + (np.var(uh) / 2.0 if compound else 0.0)
+    em = st.session_state.eur_market_return / 100.0 + (np.var(eh) / 2.0 if compound else 0.0)
+    vsu, vse = build_valuation_shift(n_years, st.session_state.usd_market_return / 100.0,
+                                     st.session_state.eur_market_return / 100.0)
+    idx = []
+    while len(idx) < n_years:
+        s = rng.integers(0, nb)
+        idx.extend(range(s, s + block))
+    idx = np.array(idx[:n_years])
+    u = uh[idx] - uh.mean() + um + vsu
+    e = eh[idx] - eh.mean() + em + vse
+    b = draw_bond_path(u, rng)
+    return apply_crisis_overlay(u, e, b, rng)
+
+
+def build_stress_scenario(rng, usd_path, flags=None, years=None):
+    """Build the per-path stress-factor scenario dict.
+
+    flags=None honors the Stress Factors checkboxes (the main MC behavior);
+    otherwise apply ONLY the named factors out of
+    {'inflation','fx','longevity','ltc','tax','ss'} (tornado / interaction
+    matrix behavior). Longevity always carries '_first_death_yr' so the
+    survivor scenario engages consistently in every consumer."""
+    years = years or MC_YEARS
+    S = st.session_state
+
+    def on(name, enabled_default):
+        return enabled_default if flags is None else (name in flags)
+
+    sc = {}
+    u = np.asarray(usd_path, dtype=float)
+    if on('inflation', S.mc_stoch_inflation):
+        base_infl = S.inflation_rate / 100.0
+        iv = S.mc_infl_vol / 100.0
+        ic = S.mc_infl_equity_corr
+        em_ = u.mean()
+        es_ = u.std() or 1e-9
+        infl = {}
+        for i, y in enumerate(years):
+            z = (u[i] - em_) / es_
+            infl[y] = max(-0.02, base_infl + ic * z * iv + np.sqrt(max(0.0, 1 - ic ** 2)) * rng.normal(0, iv))
+        sc['inflation'] = infl
+    if on('fx', S.mc_stoch_fx):
+        fxv = S.mc_fx_vol / 100.0
+        fxb = S.fx_rate if S.fx_enable else 1.0
+        kappa = S.get('mc_fx_reversion', 0.15)
+        log_lvl = 0.0
+        fx = {}
+        for y in years:
+            log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fxv)
+            fx[y] = fxb * np.exp(log_lvl)
+        sc['fx'] = fx
+    if on('longevity', S.mc_stoch_longevity):
+        start = S.current_age
+        woff = S.mc_wife_age_offset
+        d_self = sample_death_age(start, SURV_MALE, rng)
+        d_sp = sample_death_age(start - woff, SURV_FEMALE, rng)
+        sy = 2026 + (d_self - start)
+        py = 2026 + (d_sp - (start - woff))
+        sc['death_year'] = min(2089, max(sy, py))
+        sc['_first_death_yr'] = min(sy, py)
+    if on('ltc', S.mc_ltc_enable):
+        ltc = {}
+        for _p in range(2):
+            if rng.random() < S.mc_ltc_prob:
+                onset = 2026 + (int(rng.integers(78, 90)) - S.current_age)
+                for kk in range(int(S.mc_ltc_years)):
+                    if onset + kk <= 2089:
+                        ltc[onset + kk] = ltc.get(onset + kk, 0) + S.mc_ltc_cost
+        if ltc:
+            sc['ltc_cost'] = ltc
+    if on('tax', S.mc_tax_regime):
+        sc['tax_mult'] = max(0.2, rng.normal(1.0, S.mc_tax_vol))
+    if on('ss', S.mc_ss_haircut_prob > 0):
+        if rng.random() < S.mc_ss_haircut_prob:
+            sc['ss_haircut'] = S.mc_ss_haircut_size
+    return sc
+
+
+def discount_map_from(sc, years=None):
+    """Per-path real (2026 $) discount factors: realized inflation when the path
+    is stochastic, the deterministic assumption otherwise."""
+    years = years or MC_YEARS
+    if 'inflation' in sc:
+        dm = {}
+        cpi = 1.0
+        for y in years:
+            if y > 2026:
+                cpi *= (1 + sc['inflation'][y])
+            dm[y] = cpi
+        return dm
+    inf = st.session_state.inflation_rate / 100.0
+    return {y: (1 + inf) ** (y - 2026) for y in years}
+
+
+def retirement_target_map():
+    """(retirement years, {year: real 2026-$ lifestyle target}) under the
+    golden/middle/wind-down phases."""
+    start = st.session_state.current_age
+    ret_start = 2026 + (st.session_state.ret_age - start)
+    ret_years = [y for y in MC_YEARS if y >= ret_start]
+
+    def _tgt(a):
+        return st.session_state.spend_golden if a < 70 else (
+            st.session_state.spend_middle if a < 85 else st.session_state.spend_wind)
+
+    return ret_years, {y: _tgt(start + (y - 2026)) for y in ret_years}
+
+
+def score_path_joint(db, dd, sc, ret_years, target_map, gift_goal):
+    """Survivor-aware joint-success scoring shared by EVERY MC consumer.
+
+    - Solvency is judged through the household's actual death year (depletion
+      after both have died is irrelevant).
+    - Lifestyle is scored over living years only, against a target that is
+      scaled DOWN by the survivor expense ratio after the first death --
+      otherwise the intentional survivor spending reduction would wrongly count
+      as a shortfall (the divergence that previously existed between the
+      dashboard and Page 12).
+    - Gifting is real (2026 $) over living retirement years."""
+    dm = discount_map_from(sc)
+    tot = db.loc['Total Portfolio Balance']
+    death_yr = sc.get('death_year', 2089)
+    zeros = tot[tot <= 0]
+    first_zero = zeros.index.min() if len(zeros) > 0 else None
+    nd = (first_zero is None) or (first_zero > death_yr)
+    scored = [y for y in ret_years if y <= death_yr]
+    fd = sc.get('_first_death_yr')
+    surv_on = st.session_state.survivor_enable and (fd is not None)
+    sr = st.session_state.survivor_expense_ratio if surv_on else 1.0
+
+    def adj_target(y):
+        t = target_map[y]
+        return t * sr if (surv_on and y > fd) else t
+
+    stgt = sum(adj_target(y) for y in scored) or 1.0
+    life = dd.loc["Actual Lifestyle Spend"]
+    gift = dd.loc["Actual Generational Drip"]
+    ar = sum(life.get(y, 0.0) / dm[y] for y in scored)
+    ratio = ar / stgt
+    gift_real = sum(gift.get(y, 0.0) / dm[y] for y in scored)
+    return {'nd': nd, 'ratio': ratio, 'full': ratio >= 0.95, 'gift_real': gift_real,
+            'joint': nd and (ratio >= 0.95) and (gift_real >= gift_goal),
+            'death_yr': death_yr, 'first_zero': first_zero, 'dm': dm,
+            'scored_years': scored, 'adj_target': adj_target}
+
+
+def score_joint_success_for_ss(n_runs, seed, m_age, s_age):
+    """Monte Carlo joint-success rate for a pair of SS claim ages, with common
+    random numbers so claim-age pairs are compared on identical markets.
+
+    Now includes STOCHASTIC LONGEVITY, the SURVIVOR scenario, and the SS-haircut
+    lottery -- the factors that actually drive claim timing. (Previously the
+    optimizer ran on a fixed age-100 horizon with no mortality, so longevity
+    insurance and survivor protection -- the primary economic reasons to delay
+    claiming -- were absent from its objective.) The remaining stress factors
+    (inflation, FX, LTC, tax drift) are left off here for speed and CRN
+    cleanliness; the main MC carries them."""
+    ret_years, tmap = retirement_target_map()
+    gift_goal = float(st.session_state.get('mc_gift_goal', 500000))
+    nN = len(MC_YEARS)
+    rng = np.random.default_rng(seed)
+    ok = 0
     for _ in range(n_runs):
-        idx = []
-        while len(idx) < nN:
-            s = rng.integers(0, nb); idx.extend(range(s, s + block))
-        idx = _np.array(idx[:nN])
-        u = uh[idx]-uh[idx].mean()+um+vsu; e = eh[idx]-eh[idx].mean()+em+vse
-        mu = u.mean(); sd = u.std() or 1e-9; zb = rng.standard_normal(nN); b = _np.empty(nN)
-        for i, r in enumerate(u):
-            z = (r-mu)/sd; c = cc if (z < -1.0 and r < 0) else cn
-            b[i] = bm + bv*(c*z + _np.sqrt(max(0.0,1-c**2))*zb[i])
-        u, e, b = apply_crisis_overlay(u, e, b, rng)
-        sc = {'returns': {years[i]: (float(u[i]), float(e[i])) for i in range(nN)},
-              'bond': {years[i]: float(b[i]) for i in range(nN)}}
+        u, e, b = make_bootstrap_paths(rng)
+        sc = build_stress_scenario(rng, u, flags={'longevity', 'ss'})
+        sc['returns'] = {MC_YEARS[i]: (float(u[i]), float(e[i])) for i in range(nN)}
+        sc['bond'] = {MC_YEARS[i]: float(b[i]) for i in range(nN)}
         db, dd, _, _, _ = run_core_simulation(override_m_age=m_age, override_s_age=s_age, scenario=sc)
-        tot = db.loc['Total Portfolio Balance']
-        nd = (len(tot[tot <= 0]) == 0) or (tot[tot <= 0].index.min() > 2089)
-        dm = {y: (1+inf)**(y-2026) for y in years}
-        life = dd.loc["Actual Lifestyle Spend"]; gift = dd.loc["Actual Generational Drip"]
-        ar = sum(life.get(y, 0)/dm[y] for y in ret_years)
-        full = (ar/total_tgt) >= 0.95
-        gt = sum(gift.get(y, 0)/dm[y] for y in ret_years)
-        if nd and full and gt >= gift_goal:
+        if score_path_joint(db, dd, sc, ret_years, tmap, gift_goal)['joint']:
             ok += 1
     return 100.0 * ok / n_runs
 
 
 def dashboard_full_stress_metrics(n_runs, seed):
-    """Runs the SAME full-stress engine as Page 12 (valuation conditioning + crisis overlay +
-    EUR bond sleeve + every enabled stress factor: stochastic inflation, FX, longevity, LTC,
-    tax-regime drift, SS haircut, and the survivor scenario) and returns three things:
-    tax-regime drift, SS haircut, and the survivor scenario) and returns a dict with:
-      - never_deplete %: share of paths solvent through the survivor's death (true success)
-      - full_lifestyle %: share also funding >=95% of real target lifestyle (the strict bar)
-      - band_full/band_mid/band_low: share funding >=95% / 85-95% / <85% of target
-      - median_funded %: the typical (median) share of target lifestyle funded
-      - ages, by_age: portfolio-solvency probability at each age 70-100 (monotonic)
-    This is the honest dashboard number; it deliberately mirrors Page 12 rather than the old
-    light engine, so the headline matches the rigorous analysis."""
-    import numpy as _np
-    years = list(range(2026, 2090)); nN = len(years)
-    inf = st.session_state.inflation_rate / 100.0
+    """Runs the SAME full-stress engine as Page 12 (valuation conditioning +
+    crisis overlay + EUR bond sleeve + every enabled stress factor) and returns
+    the dashboard metrics dict. Built entirely on the shared helpers so the
+    headline number and Page 12 cannot diverge again."""
+    ret_years, tmap = retirement_target_map()
     start = st.session_state.current_age
-    ret_start = 2026 + (st.session_state.ret_age - st.session_state.current_age)
-    ret_years = [y for y in years if y >= ret_start]
-    def _tgt(a):
-        return st.session_state.spend_golden if a < 70 else (st.session_state.spend_middle if a < 85 else st.session_state.spend_wind)
-    target_real_map = {y: _tgt(start + (y - 2026)) for y in ret_years}
+    nN = len(MC_YEARS)
+    rng = np.random.default_rng(seed)
 
-    common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
-    uh = _np.array([SP500_BY_YEAR[y] for y in common]) / 100.0
-    eh = _np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common]) / 100.0
-    block = int(st.session_state.get('mc_block_len', 5)); nb = len(common) - block + 1
-    um = st.session_state.usd_market_return/100.0 + _np.var(uh)/2
-    em = st.session_state.eur_market_return/100.0 + _np.var(eh)/2
-    bm = st.session_state.bond_mean/100.0; bv = st.session_state.bond_vol/100.0
-    cn = st.session_state.bond_eq_corr; cc = st.session_state.bond_eq_corr_crisis
-    vsu, vse = build_valuation_shift(nN, st.session_state.usd_market_return/100.0, st.session_state.eur_market_return/100.0)
+    depl_living_ages, death_ages = [], []
+    path_success, full_life, funded_ratios, lifetime_gift_real = [], [], [], []
+    spend_matrix = np.full((n_runs, len(ret_years)), np.nan)
 
-    base_infl = st.session_state.inflation_rate/100.0
-    infl_vol = st.session_state.mc_infl_vol/100.0
-    infl_corr = st.session_state.mc_infl_equity_corr
-    fx_vol = st.session_state.mc_fx_vol/100.0; fx_base = st.session_state.fx_rate
-    woff = st.session_state.mc_wife_age_offset
-
-    rng = _np.random.default_rng(seed)
-    depl_living_ages = []   # financial depletion age (or 101)
-    death_ages = []         # survivor death age (or 101 if longevity off)
-    path_success = []       # solvent through death
-    full_life = []          # also funded >=95% lifestyle
-    funded_ratios = []      # achieved real lifestyle / target, per path (for distribution)
-    lifetime_gift_real = []  # total real (2026 $) generational gift per path (distribution)
-    # Per-year achieved real (2026 $) lifestyle spend, one row per path. NaN after death so
-    # the by-year median reflects only living-household years, not post-death zero spend.
-    ret_years_all = [y for y in years if y >= ret_start]
-    spend_matrix = _np.full((n_runs, len(ret_years_all)), _np.nan)
     for _run in range(n_runs):
-        idx = []
-        while len(idx) < nN:
-            s = rng.integers(0, nb); idx.extend(range(s, s + block))
-        idx = _np.array(idx[:nN])
-        u = uh[idx]-uh[idx].mean()+um+vsu; e = eh[idx]-eh[idx].mean()+em+vse
-        mu = u.mean(); sd = u.std() or 1e-9; zb = rng.standard_normal(nN); b = _np.empty(nN)
-        for i, r in enumerate(u):
-            z = (r-mu)/sd; c = cc if (z < -1.0 and r < 0) else cn
-            b[i] = bm + bv*(c*z + _np.sqrt(max(0.0,1-c**2))*zb[i])
-        u, e, b = apply_crisis_overlay(u, e, b, rng)
-        sc = {'returns': {years[i]: (float(u[i]), float(e[i])) for i in range(nN)},
-              'bond': {years[i]: float(b[i]) for i in range(nN)}}
-        # Full stress factors (mirror Page 12 build_scenario).
-        if st.session_state.mc_stoch_inflation:
-            infl = {}
-            for i, y in enumerate(years):
-                eq_z = (u[i] - mu)/sd
-                infl[y] = max(-0.02, base_infl + infl_corr*eq_z*infl_vol + _np.sqrt(max(0,1-infl_corr**2))*rng.normal(0, infl_vol))
-            sc['inflation'] = infl
-        if st.session_state.mc_stoch_fx:
-            fx = {}; log_lvl = 0.0
-            kappa = st.session_state.get('mc_fx_reversion', 0.15)
-            for y in years:
-                # Ornstein-Uhlenbeck in log space: pull back toward parity (0), then shock.
-                log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fx_vol)
-                fx[y] = fx_base * _np.exp(log_lvl)
-            sc['fx'] = fx
-        death_yr = 2089
-        if st.session_state.mc_stoch_longevity:
-            d_self = sample_death_age(start, SURV_MALE, rng)
-            d_sp = sample_death_age(start - woff, SURV_FEMALE, rng)
-            sy = 2026 + (d_self - start); py = 2026 + (d_sp - (start - woff))
-            death_yr = min(2089, max(sy, py))
-            sc['death_year'] = death_yr; sc['_first_death_yr'] = min(sy, py)
-        if st.session_state.mc_ltc_enable:
-            ltc = {}
-            for _p in range(2):
-                if rng.random() < st.session_state.mc_ltc_prob:
-                    onset = 2026 + (int(rng.integers(78,90)) - start)
-                    for kk in range(int(st.session_state.mc_ltc_years)):
-                        if onset+kk <= 2089: ltc[onset+kk] = ltc.get(onset+kk,0)+st.session_state.mc_ltc_cost
-            if ltc: sc['ltc_cost'] = ltc
-        if st.session_state.mc_tax_regime:
-            sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
-        if rng.random() < st.session_state.mc_ss_haircut_prob:
-            sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
-
+        u, e, b = make_bootstrap_paths(rng)
+        sc = build_stress_scenario(rng, u)  # honors the Stress Factors checkboxes
+        sc['returns'] = {MC_YEARS[i]: (float(u[i]), float(e[i])) for i in range(nN)}
+        sc['bond'] = {MC_YEARS[i]: float(b[i]) for i in range(nN)}
         db, dd, _, _, _ = run_core_simulation(scenario=sc)
-        tot = db.loc['Total Portfolio Balance']
-        zeros = tot[tot <= 0]
-        first_zero_yr = zeros.index.min() if len(zeros) > 0 else None
-        # Success = solvent through the household's death (not a fixed 100).
-        if first_zero_yr is None or first_zero_yr > death_yr:
-            path_success.append(True)
-        else:
-            path_success.append(False)
-        depl_living_ages.append((first_zero_yr - 2026 + start) if first_zero_yr is not None else 101)
-        death_ages.append((death_yr - 2026 + start) if st.session_state.mc_stoch_longevity else 100)
-        # Lifestyle funding (real), scored only over living years.
-        if 'inflation' in sc:
-            dm = {}; cpi = 1.0
-            for y in years:
-                if y > 2026: cpi *= (1+sc['inflation'][y])
-                dm[y] = cpi
-        else:
-            dm = {y: (1+inf)**(y-2026) for y in years}
-        scored = [y for y in ret_years if y <= death_yr]
-        # Survivor-aware target: after the first death the household SHOULD spend less (the
-        # survivor expense ratio), so scoring achieved spend against the full couple's target
-        # would wrongly count the intentional reduction as a shortfall. Scale the target down
-        # in survivor years to match what the household actually needs.
-        first_dy = sc.get('_first_death_yr', None)
-        surv_on = st.session_state.survivor_enable and (first_dy is not None)
-        sratio = st.session_state.survivor_expense_ratio if surv_on else 1.0
-        def _adj_target(y):
-            base = target_real_map[y]
-            return base * sratio if (surv_on and y > first_dy) else base
-        stgt = sum(_adj_target(y) for y in scored) or 1.0
+        R = score_path_joint(db, dd, sc, ret_years, tmap, 0.0)
+        path_success.append(R['nd'])
+        funded_ratios.append(R['ratio'])
+        lifetime_gift_real.append(R['gift_real'])
+        full_life.append(R['nd'] and R['ratio'] >= 0.95)
+        fz = R['first_zero']
+        depl_living_ages.append((fz - 2026 + start) if fz is not None else 101)
+        death_ages.append((R['death_yr'] - 2026 + start) if st.session_state.mc_stoch_longevity else 100)
+        dm = R['dm']
         life = dd.loc["Actual Lifestyle Spend"]
-        ar = sum(life.get(y,0)/dm[y] for y in scored)
-        ratio = ar / stgt
-        funded_ratios.append(ratio)
-        gift = dd.loc["Actual Generational Drip"]
-        lifetime_gift_real.append(sum(gift.get(y, 0.0)/dm[y] for y in scored))
-        # Record per-year achieved real spend (living years only; NaN after death).
-        for ci, y in enumerate(ret_years_all):
-            if y <= death_yr:
+        for ci, y in enumerate(ret_years):
+            if y <= R['death_yr']:
                 spend_matrix[_run, ci] = life.get(y, 0.0) / dm[y]
-        full_life.append(path_success[-1] and ratio >= 0.95)
 
-    path_success = _np.array(path_success); full_life = _np.array(full_life)
-    depl = _np.array(depl_living_ages); dage = _np.array(death_ages)
-    fr = _np.array(funded_ratios)
+    path_success = np.array(path_success)
+    full_life = np.array(full_life)
+    depl = np.array(depl_living_ages)
+    fr = np.array(funded_ratios)
     never_deplete = 100.0 * path_success.mean()
     full_lifestyle = 100.0 * full_life.mean()
-    # Funded-lifestyle distribution: most "not 95%" paths still fund 85-95%, not destitution.
-    # Bands are share of paths funding >=95%, 85-95%, and below 85% of target real lifestyle.
-    band_full = 100.0 * _np.mean(fr >= 0.95)
-    band_mid = 100.0 * _np.mean((fr >= 0.85) & (fr < 0.95))
-    band_low = 100.0 * _np.mean(fr < 0.85)
-    median_funded = 100.0 * float(_np.median(fr))
-    # By-age curve: unconditional probability the PORTFOLIO is still solvent at each age
-    # (financial depletion age >= a). This is guaranteed monotonic non-increasing and is the
-    # clean "will the money still be there at age X" line. (Conditioning on being alive made
-    # the tail noisy because few paths reach 100.)
+    band_full = 100.0 * np.mean(fr >= 0.95)
+    band_mid = 100.0 * np.mean((fr >= 0.85) & (fr < 0.95))
+    band_low = 100.0 * np.mean(fr < 0.85)
+    median_funded = 100.0 * float(np.median(fr))
     ages = list(range(70, 101))
-    by_age = [100.0 * _np.mean(depl >= a) for a in ages]
-    # By-year achieved real lifestyle spend: median and 25-75 band across paths (living years).
-    with _np.errstate(all='ignore'):
-        spend_median = _np.nanmedian(spend_matrix, axis=0)
-        spend_p25 = _np.nanpercentile(spend_matrix, 25, axis=0)
-        spend_p75 = _np.nanpercentile(spend_matrix, 75, axis=0)
-    spend_target = [target_real_map[y] for y in ret_years_all]
-    gift_arr = _np.array(lifetime_gift_real)
-    gift_median = float(_np.median(gift_arr)) if len(gift_arr) else 0.0
-    gift_p10 = float(_np.percentile(gift_arr, 10)) if len(gift_arr) else 0.0
-    gift_p90 = float(_np.percentile(gift_arr, 90)) if len(gift_arr) else 0.0
+    by_age = [100.0 * np.mean(depl >= a) for a in ages]
+    import warnings as _w
+    with np.errstate(all='ignore'), _w.catch_warnings():
+        _w.simplefilter('ignore', RuntimeWarning)  # all-NaN years (every path deceased) -> None
+        spend_median = np.nanmedian(spend_matrix, axis=0)
+        spend_p25 = np.nanpercentile(spend_matrix, 25, axis=0)
+        spend_p75 = np.nanpercentile(spend_matrix, 75, axis=0)
+    gift_arr = np.array(lifetime_gift_real)
     return {
         'never_deplete': never_deplete, 'full_lifestyle': full_lifestyle,
         'band_full': band_full, 'band_mid': band_mid, 'band_low': band_low,
         'median_funded': median_funded, 'ages': ages, 'by_age': by_age,
         'funded_ratios': (fr * 100.0).tolist(),
-        'gift_median': gift_median, 'gift_p10': gift_p10, 'gift_p90': gift_p90,
+        'gift_median': float(np.median(gift_arr)) if len(gift_arr) else 0.0,
+        'gift_p10': float(np.percentile(gift_arr, 10)) if len(gift_arr) else 0.0,
+        'gift_p90': float(np.percentile(gift_arr, 90)) if len(gift_arr) else 0.0,
         'gift_values': gift_arr.tolist(),
-        'spend_years': ret_years_all,
-        'spend_median': [None if _np.isnan(v) else float(v) for v in spend_median],
-        'spend_p25': [None if _np.isnan(v) else float(v) for v in spend_p25],
-        'spend_p75': [None if _np.isnan(v) else float(v) for v in spend_p75],
-        'spend_target': spend_target,
+        'spend_years': ret_years,
+        'spend_median': [None if np.isnan(v) else float(v) for v in spend_median],
+        'spend_p25': [None if np.isnan(v) else float(v) for v in spend_p25],
+        'spend_p75': [None if np.isnan(v) else float(v) for v in spend_p75],
+        'spend_target': [tmap[y] for y in ret_years],
         'start_age': start,
     }
 
 
 def mc_bands_for_pages(n_runs, seed):
-    """Lightweight Monte Carlo used by Pages 7 and 8 to show DISTRIBUTIONS rather than a single
-    deterministic path. Reuses the same full-stress engine (valuation conditioning, crisis
-    overlay, EUR bond sleeve, and every enabled stress factor) as the dashboard/Page 12, then
-    returns per-year percentile bands for:
-      - total portfolio balance, REAL 2026 $ (Page 8 fan chart)
-      - the weighted-average effective tax rate (Page 7 tax-rate band)
-    Only these two summary series are collected (not per-account draws), keeping it light."""
-    import numpy as _np
-    years = list(range(2026, 2090)); nN = len(years)
-    inf = st.session_state.inflation_rate / 100.0
-    start = st.session_state.current_age
-
-    common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
-    uh = _np.array([SP500_BY_YEAR[y] for y in common]) / 100.0
-    eh = _np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common]) / 100.0
-    block = int(st.session_state.get('mc_block_len', 5)); nb = len(common) - block + 1
-    um = st.session_state.usd_market_return/100.0 + _np.var(uh)/2
-    em = st.session_state.eur_market_return/100.0 + _np.var(eh)/2
-    bm = st.session_state.bond_mean/100.0; bv = st.session_state.bond_vol/100.0
-    cn = st.session_state.bond_eq_corr; cc = st.session_state.bond_eq_corr_crisis
-    vsu, vse = build_valuation_shift(nN, st.session_state.usd_market_return/100.0, st.session_state.eur_market_return/100.0)
-    base_infl = st.session_state.inflation_rate/100.0
-    infl_vol = st.session_state.mc_infl_vol/100.0; infl_corr = st.session_state.mc_infl_equity_corr
-    fx_vol = st.session_state.mc_fx_vol/100.0; fx_base = st.session_state.fx_rate
-    woff = st.session_state.mc_wife_age_offset
-
-    rng = _np.random.default_rng(seed)
-    real_bal = _np.full((n_runs, nN), _np.nan)
-    tax_rate = _np.full((n_runs, nN), _np.nan)
+    """Lightweight Monte Carlo for Pages 7 and 8: per-year percentile bands for
+    the total REAL (2026 $, USD-equivalent) portfolio balance and the
+    weighted-average effective tax rate. Same shared engine as everything else."""
+    nN = len(MC_YEARS)
+    rng = np.random.default_rng(seed)
+    real_bal = np.full((n_runs, nN), np.nan)
+    tax_rate = np.full((n_runs, nN), np.nan)
     for _run in range(n_runs):
-        idx = []
-        while len(idx) < nN:
-            s = rng.integers(0, nb); idx.extend(range(s, s + block))
-        idx = _np.array(idx[:nN])
-        u = uh[idx]-uh[idx].mean()+um+vsu; e = eh[idx]-eh[idx].mean()+em+vse
-        mu = u.mean(); sd = u.std() or 1e-9; zb = rng.standard_normal(nN); b = _np.empty(nN)
-        for i, r in enumerate(u):
-            z = (r-mu)/sd; c = cc if (z < -1.0 and r < 0) else cn
-            b[i] = bm + bv*(c*z + _np.sqrt(max(0.0,1-c**2))*zb[i])
-        u, e, b = apply_crisis_overlay(u, e, b, rng)
-        sc = {'returns': {years[i]: (float(u[i]), float(e[i])) for i in range(nN)},
-              'bond': {years[i]: float(b[i]) for i in range(nN)}}
-        if st.session_state.mc_stoch_inflation:
-            infl = {}
-            for i, y in enumerate(years):
-                eq_z = (u[i]-mu)/sd
-                infl[y] = max(-0.02, base_infl + infl_corr*eq_z*infl_vol + _np.sqrt(max(0,1-infl_corr**2))*rng.normal(0, infl_vol))
-            sc['inflation'] = infl
-        if st.session_state.mc_stoch_fx:
-            fx = {}; log_lvl = 0.0; kappa = st.session_state.get('mc_fx_reversion', 0.15)
-            for y in years:
-                log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fx_vol); fx[y] = fx_base * _np.exp(log_lvl)
-            sc['fx'] = fx
-        death_yr = 2089
-        if st.session_state.mc_stoch_longevity:
-            d_self = sample_death_age(start, SURV_MALE, rng); d_sp = sample_death_age(start - woff, SURV_FEMALE, rng)
-            sy = 2026 + (d_self - start); py = 2026 + (d_sp - (start - woff))
-            death_yr = min(2089, max(sy, py)); sc['death_year'] = death_yr; sc['_first_death_yr'] = min(sy, py)
-        if st.session_state.mc_ltc_enable:
-            ltc = {}
-            for _p in range(2):
-                if rng.random() < st.session_state.mc_ltc_prob:
-                    onset = 2026 + (int(rng.integers(78,90)) - start)
-                    for kk in range(int(st.session_state.mc_ltc_years)):
-                        if onset+kk <= 2089: ltc[onset+kk] = ltc.get(onset+kk,0)+st.session_state.mc_ltc_cost
-            if ltc: sc['ltc_cost'] = ltc
-        if st.session_state.mc_tax_regime:
-            sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
-        if rng.random() < st.session_state.mc_ss_haircut_prob:
-            sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
-
+        u, e, b = make_bootstrap_paths(rng)
+        sc = build_stress_scenario(rng, u)
+        sc['returns'] = {MC_YEARS[i]: (float(u[i]), float(e[i])) for i in range(nN)}
+        sc['bond'] = {MC_YEARS[i]: float(b[i]) for i in range(nN)}
         db, _, dtax, _, _ = run_core_simulation(scenario=sc)
         tot = db.loc['Total Portfolio Balance']
-        # Per-path real discount factors (use realized inflation if stochastic).
-        if 'inflation' in sc:
-            dm = {}; cpi = 1.0
-            for y in years:
-                if y > 2026: cpi *= (1+sc['inflation'][y])
-                dm[y] = cpi
-        else:
-            dm = {y: (1+inf)**(y-2026) for y in years}
-        for i, y in enumerate(years):
-            bal = tot.get(y, _np.nan)
-            real_bal[_run, i] = (bal/dm[y]) if (bal == bal and bal > 0) else (0.0 if bal == bal else _np.nan)
+        dm = discount_map_from(sc)
+        for i, y in enumerate(MC_YEARS):
+            bal = tot.get(y, np.nan)
+            real_bal[_run, i] = (bal / dm[y]) if (bal == bal and bal > 0) else (0.0 if bal == bal else np.nan)
             if 'Weighted Average' in dtax.index and y in dtax.columns:
                 tr = dtax.loc['Weighted Average', y]
-                tax_rate[_run, i] = tr if tr == tr else _np.nan
+                tax_rate[_run, i] = tr if tr == tr else np.nan
 
     def _pcts(mat):
-        with _np.errstate(all='ignore'):
-            return {p: _np.nanpercentile(mat, p, axis=0) for p in [10, 25, 50, 75, 90]}
-    bal_p = _pcts(real_bal); tax_p = _pcts(tax_rate)
+        import warnings as _w
+        with np.errstate(all='ignore'), _w.catch_warnings():
+            _w.simplefilter('ignore', RuntimeWarning)
+            return {p: np.nanpercentile(mat, p, axis=0) for p in [10, 25, 50, 75, 90]}
+
+    bal_p = _pcts(real_bal)
+    tax_p = _pcts(tax_rate)
     return {
-        'years': years,
+        'years': MC_YEARS,
         'bal_p10': bal_p[10].tolist(), 'bal_p25': bal_p[25].tolist(), 'bal_p50': bal_p[50].tolist(),
         'bal_p75': bal_p[75].tolist(), 'bal_p90': bal_p[90].tolist(),
         'tax_p10': tax_p[10].tolist(), 'tax_p25': tax_p[25].tolist(), 'tax_p50': tax_p[50].tolist(),
@@ -732,68 +749,178 @@ if 'steph_history' not in st.session_state:
 # -----------------------------------------------------------------------------
 # CORE SIMULATION ENGINE (RUNS GLOBALLY)
 # -----------------------------------------------------------------------------
-def calculate_person_benefit(history_dict, current_age, ret_age, claim_age, future_pct, cola, haircut, awi):
+# -----------------------------------------------------------------------------
+# PROGRESSIVE TAX TABLES (US + SLOVENIA)
+# Used by the core engine when 'use_progressive_tax' is on (the default). All
+# ordinary income in a year (pre-tax draws, RMDs, Roth conversions, taxable SS,
+# non-qualified Roth-sweep earnings) stacks through these brackets instead of
+# the legacy flat base/excess rates. Post-move, the combined liability is
+# max(US, Slovenia) -- the savings-clause + foreign-tax-credit outcome -- and a
+# survivor files SINGLE (half-width brackets, half deduction), which replaces
+# the flat widow's-penalty surcharge. Bracket thresholds are 2026 levels and
+# are indexed by the path's realized CPI.
+# -----------------------------------------------------------------------------
+US_BRACKETS_MFJ = [(0, 0.10), (24800, 0.12), (100800, 0.22), (211400, 0.24),
+                   (403550, 0.32), (512450, 0.35), (768700, 0.37)]
+US_BRACKETS_SINGLE = [(0, 0.10), (12400, 0.12), (50400, 0.22), (105700, 0.24),
+                      (201775, 0.32), (256225, 0.35), (640600, 0.37)]
+US_STD_DED_MFJ = 32200       # 2026 MFJ standard deduction (approx., post-OBBBA)
+US_STD_DED_SINGLE = 16100
+# Slovenia ordinary-income brackets (EUR, ~2026) and the general allowance.
+SI_BRACKETS_EUR = [(0, 0.16), (9210, 0.26), (27089, 0.33), (54178, 0.39), (80185, 0.50)]
+SI_GENERAL_ALLOWANCE_EUR = 5260
+# IRC 877A covered-expatriate exit-tax gain exclusion (2026 approx., CPI-indexed).
+EXIT_TAX_EXCLUSION_USD = 890000
+
+
+def _piecewise_tax(taxable, brackets, scale=1.0):
+    """Tax on `taxable` under bracket thresholds multiplied by `scale` (CPI index)."""
+    if taxable <= 0:
+        return 0.0
+    tax = 0.0
+    for i, (lo, rate) in enumerate(brackets):
+        lo_s = lo * scale
+        hi_s = brackets[i + 1][0] * scale if i + 1 < len(brackets) else None
+        if taxable <= lo_s:
+            break
+        top = taxable if hi_s is None else min(taxable, hi_s)
+        tax += (top - lo_s) * rate
+    return tax
+
+
+def us_ordinary_tax(gross_usd, cpi, single=False):
+    """Total US ordinary-income tax on `gross_usd`, net of the standard
+    deduction, with brackets and deduction indexed by the CPI path."""
+    std = (US_STD_DED_SINGLE if single else US_STD_DED_MFJ) * cpi
+    taxable = max(0.0, gross_usd - std)
+    return _piecewise_tax(taxable, US_BRACKETS_SINGLE if single else US_BRACKETS_MFJ, cpi)
+
+
+def si_ordinary_tax(gross_eur, cpi):
+    """Total Slovenian ordinary-income tax on `gross_eur` (general allowance and
+    brackets indexed by the CPI path -- a proxy for Slovenian indexation)."""
+    taxable = max(0.0, gross_eur - SI_GENERAL_ALLOWANCE_EUR * cpi)
+    return _piecewise_tax(taxable, SI_BRACKETS_EUR, cpi)
+
+
+# -----------------------------------------------------------------------------
+# SOCIAL SECURITY ACTUARIAL MODULE
+# -----------------------------------------------------------------------------
+def effective_cola():
+    """Resolve the central COLA assumption from the selected mode. Baseline uses
+    cola_rate (modest structural lag); Stress uses cola_stress_rate. With the
+    COLA now indexed to the path's realized inflation (see build_cola_path),
+    this defines the structural LAG vs the deterministic inflation assumption."""
+    mode = st.session_state.get('cola_mode', "Baseline (modest structural lag)")
+    if str(mode).startswith("Stress"):
+        return st.session_state.get('cola_stress_rate', 2.1)
+    return st.session_state.get('cola_rate', 2.6)
+
+
+def build_cola_path(inflation_path=None):
+    """Per-year SS COLA (%) tied to the path's REALIZED inflation.
+
+    SS benefits are CPI-indexed in reality, so a high-inflation path raises
+    COLAs (floored at 0, as the statute does). Previously the COLA was a fixed
+    nominal rate regardless of the simulated inflation, which made real SS
+    collapse in exactly the high-inflation paths the model emphasizes -- and
+    made the 1966/1973 historical cohorts (whose real-world benefits WERE
+    indexed) look far worse than they were. The structural lag
+    (inflation assumption minus the selected COLA) is preserved as the explicit
+    pessimism wedge: COLA_y = max(0, realized_inflation_y - lag)."""
+    lag = st.session_state.inflation_rate - effective_cola()
+    base = effective_cola()
+    cola = {}
+    for yr in range(2026, 2090):
+        if inflation_path is not None and yr in inflation_path:
+            cola[yr] = max(0.0, inflation_path[yr] * 100.0 - lag)
+        else:
+            cola[yr] = max(0.0, base)
+    return cola
+
+
+def calculate_person_benefit(history_dict, person_age, working_years, claim_age,
+                             future_pct, cola_path, haircut, awi):
+    """SS benefit timeline for ONE person, computed off that person's OWN age
+    (claim year, age-60 AWI indexing year, and age-62 bend-point year all key
+    off person_age -- previously the spouse's benefit was computed on the
+    primary's age, shifting her stream ~2 calendar years).
+
+    Early-claim reduction follows the statute: 5/9 of 1% per month for the
+    first 36 months before FRA (6.67%/yr) and 5/12 of 1% per month beyond
+    (5%/yr) -- so claiming at 62 with FRA 67 yields 70% of PIA, not 66.65%.
+    Delayed credits remain 8%/yr. COLAs compound along cola_path (per-year %)
+    from the year after first eligibility (age 62)."""
     current_year = 2026
-    working_yrs = max(0, ret_age - current_age)
-    age_60_year = current_year + (60 - current_age)
-    age_62_year = current_year + (62 - current_age)
-    current_max = 176100 
+    age_60_year = current_year + (60 - person_age)
+    age_62_year = current_year + (62 - person_age)
+    current_max = 176100
     indexed_earnings = []
     for yr, val in history_dict.items():
         if yr < age_60_year:
             idx_factor = (1 + (awi / 100)) ** max(0, age_60_year - yr)
             indexed_earnings.append(val * idx_factor)
-        else: indexed_earnings.append(val)
-    for i in range(working_yrs):
+        else:
+            indexed_earnings.append(val)
+    for i in range(working_years):
         yr = current_year + i
         projected_max = current_max * ((1 + (awi / 100)) ** (i + 1))
         val = projected_max * (future_pct / 100.0)
         if yr < age_60_year:
             idx_factor = (1 + (awi / 100)) ** (age_60_year - yr)
             indexed_earnings.append(val * idx_factor)
-        else: indexed_earnings.append(val)
+        else:
+            indexed_earnings.append(val)
     indexed_earnings.sort(reverse=True)
-    top_35 = (indexed_earnings[:35] + [0]*35)[:35]
+    top_35 = (indexed_earnings[:35] + [0] * 35)[:35]
     aime = sum(top_35) / (35 * 12)
     # Bend points are set in the year of first eligibility (age 62) and grow with AWI.
-    # 2026 bend points are $1,286 and $7,749 (SSA). We grow the 2026 values by AWI
-    # to the year this person turns 62.
     bp_growth_years = max(0, age_62_year - 2026)
     bp_multiplier = (1 + (awi / 100)) ** bp_growth_years
     bp1, bp2 = 1286 * bp_multiplier, 7749 * bp_multiplier
-    if aime <= bp1: pia = 0.9 * aime
-    elif aime <= bp2: pia = (0.9 * bp1) + 0.32 * (aime - bp1)
-    else: pia = (0.9 * bp1) + 0.32 * (bp2 - bp1) + 0.15 * (aime - bp2)
-    mult = 1.0
-    if claim_age > 67: mult += (claim_age - 67) * 0.08
-    elif claim_age < 67: mult -= (67 - claim_age) * 0.0667
-    cola_years_before_claim = max(0, claim_age - max(62, current_age))
-    cola_multiplier = (1 + (cola / 100)) ** cola_years_before_claim
-    annual_at_claim = pia * 12 * mult * cola_multiplier * (1 - (haircut / 100))
+    if aime <= bp1:
+        pia = 0.9 * aime
+    elif aime <= bp2:
+        pia = (0.9 * bp1) + 0.32 * (aime - bp1)
+    else:
+        pia = (0.9 * bp1) + 0.32 * (bp2 - bp1) + 0.15 * (aime - bp2)
+    # Claim-age adjustment (FRA 67), statutory schedule.
+    if claim_age >= 67:
+        mult = 1.0 + (claim_age - 67) * 0.08
+    else:
+        months_early = (67 - claim_age) * 12
+        mult = 1.0 - min(months_early, 36) * (5.0 / 900.0) - max(0, months_early - 36) * (5.0 / 1200.0)
+    base_annual = pia * 12 * mult * (1 - (haircut / 100))
+    claim_year = current_year + (claim_age - person_age)
     timeline = {}
-    claim_year = current_year + (claim_age - current_age)
+    cola_idx = 1.0
     for yr in range(2026, 2090):
-        if yr < claim_year: timeline[yr] = 0
-        else: timeline[yr] = annual_at_claim * ((1 + (cola / 100)) ** (yr - claim_year))
+        if yr > max(2026, age_62_year):
+            cola_idx *= (1 + cola_path.get(yr, 0.0) / 100.0)
+        timeline[yr] = base_annual * cola_idx if yr >= claim_year else 0.0
     return timeline
 
-def effective_cola():
-    """Resolve the COLA actually used by the engine from the selected mode. Baseline uses
-    cola_rate (modest structural lag); Stress uses cola_stress_rate (large persistent lag).
-    Centralizing this makes the COLA assumption explicit and consistent everywhere SS is
-    computed, instead of a single invisible number."""
-    mode = st.session_state.get('cola_mode', "Baseline (modest structural lag)")
-    if str(mode).startswith("Stress"):
-        return st.session_state.get('cola_stress_rate', 2.1)
-    return st.session_state.get('cola_rate', 2.6)
 
-def get_ss_timelines(override_m_age=None, override_s_age=None):
-    m_age = override_m_age if override_m_age is not None else st.session_state.mike_ss_age
-    s_age = override_s_age if override_s_age is not None else st.session_state.steph_ss_age
-    cola = effective_cola()
-    mike_ss = calculate_person_benefit(st.session_state.mike_history, st.session_state.current_age, st.session_state.ret_age, m_age, st.session_state.mike_future_pct, cola, st.session_state.trust_fund_haircut, st.session_state.awi_rate)
-    steph_ss = calculate_person_benefit(st.session_state.steph_history, st.session_state.current_age, st.session_state.ret_age, s_age, st.session_state.steph_future_pct, cola, st.session_state.trust_fund_haircut, st.session_state.awi_rate)
+def get_ss_timelines(override_m_age=None, override_s_age=None, inflation_path=None):
+    """Household SS timelines. Each spouse's benefit is computed on their own
+    age (spouse = current_age - mc_wife_age_offset, matching the longevity
+    module). Pass the scenario's inflation path so COLAs follow realized
+    inflation; deterministic runs reproduce the selected baseline/stress COLA."""
+    m_claim = override_m_age if override_m_age is not None else st.session_state.mike_ss_age
+    s_claim = override_s_age if override_s_age is not None else st.session_state.steph_ss_age
+    cola_path = build_cola_path(inflation_path)
+    ret_cal_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
+    working_years = max(0, ret_cal_yr - 2026)  # both spouses work until the household retires
+    mike_age = st.session_state.current_age
+    steph_age = st.session_state.current_age - st.session_state.get('mc_wife_age_offset', 2)
+    mike_ss = calculate_person_benefit(st.session_state.mike_history, mike_age, working_years,
+                                       m_claim, st.session_state.mike_future_pct, cola_path,
+                                       st.session_state.trust_fund_haircut, st.session_state.awi_rate)
+    steph_ss = calculate_person_benefit(st.session_state.steph_history, steph_age, working_years,
+                                        s_claim, st.session_state.steph_future_pct, cola_path,
+                                        st.session_state.trust_fund_haircut, st.session_state.awi_rate)
     return mike_ss, steph_ss
+
 
 def run_core_simulation(override_m_age=None, override_s_age=None, override_early_draw=None, return_overrides=None, scenario=None):
     # return_overrides: optional dict {year: (usd_return_frac, eur_return_frac)} for the
@@ -802,138 +929,136 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
     # scenario: optional dict for the multi-factor Monte Carlo, with any of these keys:
     #   'returns'   : {year: (usd_frac, eur_frac)}      stochastic equity returns
     #   'inflation' : {year: inflation_frac}            stochastic per-year inflation
-    #   'fx'        : {year: fx_multiplier}             stochastic EUR-funding cost multiplier
+    #   'fx'        : {year: usd_per_eur_spot}          stochastic EUR/USD spot rate
+    #   'bond'      : {year: bond_frac}                 stochastic EUR bond returns
+    #   'roth_conv' : (annual, start_age, end_age)      conversion override for optimizer
     #   'death_year': int                               year after which no household spending
-    #                                                    (longevity); also flips to survivor SS
-    #   'survivor_year': int                            year a spouse dies (single-filer onward)
+    #   '_first_death_yr': int                          first spouse's death -> survivor phase
     #   'tax_mult'  : float                             multiplier on all tax rates (regime risk)
     #   'ss_haircut': float (0-1)                       fractional SS benefit cut
     #   'ltc_cost'  : {year: real_usd}                  extra real long-term-care spend by year
     # Missing keys fall back to deterministic session-state values.
+    #
+    # DENOMINATION MODEL (the Tier-1 FX fix). The household's true liability after the
+    # move is a EURO consumption basket. Lifestyle targets are entered in today's USD
+    # purchasing power and translated ONCE to euros via the explicit cost-of-living
+    # ratio (sl_col_ratio, e.g. 0.77 EUR per $1 of US-equivalent lifestyle). The
+    # EUR/USD spot rate (fx) then prices every currency CROSSING: USD assets funding
+    # euro spending pay fx dollars per euro (a stronger euro drains them faster --
+    # the correct direction of risk), while EUR-denominated assets (IBKR, Cash) fund
+    # euro spending 1:1 and are genuine hedges. USD income (SS, gifts to US family)
+    # converts to euros at spot. All aggregates -- Total Portfolio Balance, the
+    # withdrawal-rate guardrail, terminal wealth -- are reported in USD-equivalents
+    # with EUR balances translated at the year's spot rate, and every USD->EUR
+    # conversion event (the Roth sweep, home-sale proceeds, surplus redeposits) is
+    # charged the spot rate instead of converting at par.
     sc = scenario or {}
     sc_returns = sc.get('returns')
     sc_inflation = sc.get('inflation')
     sc_fx = sc.get('fx')
-    sc_bond = sc.get('bond')  # per-year EUR bond return for the allocation glide (MC)
-    sc_roth_conv = sc.get('roth_conv')  # (annual_amount, start_age, end_age) override for optimizer
+    sc_bond = sc.get('bond')
+    sc_roth_conv = sc.get('roth_conv')
     sc_death_year = sc.get('death_year')
-    sc_first_death_year = sc.get('_first_death_yr')  # year the FIRST spouse dies -> survivor phase
+    sc_first_death_year = sc.get('_first_death_yr')
     sc_tax_mult = sc.get('tax_mult', 1.0)
     sc_ltc = sc.get('ltc_cost', {})
-    MIKE_SS, STEPH_SS = get_ss_timelines(override_m_age, override_s_age)
+    # SS COLAs follow the path's realized inflation (Tier-1 fix #6).
+    MIKE_SS, STEPH_SS = get_ss_timelines(override_m_age, override_s_age, inflation_path=sc_inflation)
     start_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
     move_yr = 2026 + (st.session_state.move_age - st.session_state.current_age)
-    
+
     policy = st.session_state.policy_df.set_index("Asset Category")
     current_balances = st.session_state.asset_balances.copy()
-    current_basis = st.session_state.asset_balances.copy() 
-    
+    current_basis = st.session_state.asset_balances.copy()
+
+    EUR_ASSETS = ("IBKR (Active)", "Cash (Slush Fund)")
+    PRETAX_ACCOUNTS = ["Cornerstone: Trad 401(k)", "OCC: Trad 401(k)", "Cornerstone: Profit Sharing"]
+    ROTH_ACCOUNTS = ["Cornerstone: Roth 401(k)", "OCC: Roth 401(k)"]
+    DIV_ASSETS = ("E*TRADE (Legacy)", "IBKR (Active)")
+    TAXABLE_ACCOUNTS = ["E*TRADE (Legacy)", "Crypto (Coinbase)", "IBKR (Active)"]
+
     rmd_divisors = {75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1, 80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0, 86: 15.2, 87: 14.4, 88: 13.7, 89: 12.9, 90: 12.2, 91: 11.5, 92: 10.8, 93: 10.1, 94: 9.5, 95: 8.9, 96: 8.4, 97: 7.8, 98: 7.3, 99: 6.8, 100: 6.4}
-    
+
     bal_matrix, draw_matrix, tax_matrix, cont_matrix, wr_matrix = {}, {}, {}, {}, {}
     asset_rows = list(current_balances.keys())
-    
-    fx_mult_base = st.session_state.fx_rate if st.session_state.fx_enable else 1.0
-    
-    # State Tracker for Guardrails & Past Gifts
-    spend_level = 1.0 
+
+    fx_base = st.session_state.fx_rate if st.session_state.fx_enable else 1.0
+    col_in = st.session_state.get('sl_col_ratio', 0.77)
+    progressive = st.session_state.get('use_progressive_tax', True)
+    div_on = st.session_state.get('model_div_tax', True)
+    div_y = st.session_state.get('div_yield', 1.7) / 100.0
+    citizen = st.session_state.retain_us_citizenship
+    us_ltcg = st.session_state.us_ltcg_rate / 100.0
+    roth_first = st.session_state.get('roth_first', True)
+    ibkr_aging = st.session_state.get('ibkr_lot_aging', True)
+    reset_defer = str(st.session_state.get('great_reset_mode', '')).startswith("Defer")
+
+    def slovenia_graduated_rate(years_held):
+        # Slovenian schedular capital-gains rates by holding period (capital gains are
+        # taxed at flat schedular rates in Slovenia, NOT through the progressive brackets).
+        if years_held > 15:
+            return 0.0
+        elif years_held > 10:
+            return 0.15
+        elif years_held > 5:
+            return 0.20
+        else:
+            return 0.25
+
+    def legacy_cg_rate(years_held, slovenia_flag):
+        # Residual US layer (treaty savings clause): effective rate = max(SI, US LTCG)
+        # while a citizen; SI-only after renouncing (the exit tax below charges the toll).
+        if not slovenia_flag:
+            return us_ltcg
+        sl_rate = slovenia_graduated_rate(years_held)
+        if citizen:
+            return max(sl_rate, us_ltcg)
+        return sl_rate
+
+    # State trackers
+    spend_level = 1.0
     cumulative_gifts_tracker = 0.0
-    # Cumulative inflation index (CPI=1.0 at 2026). With stochastic per-year inflation we
-    # must compound the actual realized path, not raise a single year's rate to a power.
     cpi_index = 1.0
-    
-    def execute_draw(asset, gross_amount_native, statutory_tax_rate, is_brokerage, draws_dict, taxes_dict):
-        if gross_amount_native <= 0 or current_balances[asset] <= 0: return 0.0
-        actual_gross = min(gross_amount_native, current_balances[asset])
-        if is_brokerage:
-            gain_ratio = max(0, (current_balances[asset] - current_basis[asset]) / current_balances[asset])
-            effective_tax_rate = statutory_tax_rate * gain_ratio 
-        else: effective_tax_rate = statutory_tax_rate
-        
-        actual_tax = actual_gross * effective_tax_rate
-        actual_net = actual_gross - actual_tax
-        draws_dict[asset] += actual_gross
-        taxes_dict[asset] += actual_tax
-        
-        portion_drawn = actual_gross / current_balances[asset]
-        current_basis[asset] -= (current_basis[asset] * portion_drawn)
-        current_balances[asset] -= actual_gross
-        return actual_net
-        
-    def pull_net_need(asset, target_eur_need, statutory_tax_rate, is_brokerage, draws_dict, taxes_dict, is_slovenia):
-        if target_eur_need <= 0 or current_balances[asset] <= 0: return 0.0
-        
-        is_eur_asset = asset in ["IBKR (Active)", "Cash (Slush Fund)"]
-        asset_fx_mult = 1.0 if is_eur_asset else (fx_mult_global if is_slovenia else 1.0)
-        req_net_native = target_eur_need * asset_fx_mult
-        
-        if is_brokerage and current_balances[asset] > 0:
-            gain_ratio = max(0, (current_balances[asset] - current_basis[asset]) / current_balances[asset])
-            effective_tax_rate = statutory_tax_rate * gain_ratio 
-        else: effective_tax_rate = statutory_tax_rate
-            
-        req_gross_native = req_net_native / (1 - effective_tax_rate) if effective_tax_rate < 1 else req_net_native
-        actual_gross_native = min(req_gross_native, current_balances[asset])
-        actual_tax_native = actual_gross_native * effective_tax_rate
-        actual_net_native = actual_gross_native - actual_tax_native
-        
-        draws_dict[asset] += actual_gross_native
-        taxes_dict[asset] += actual_tax_native
-        
-        portion_drawn = actual_gross_native / current_balances[asset]
-        current_basis[asset] -= (current_basis[asset] * portion_drawn)
-        current_balances[asset] -= actual_gross_native
-        
-        achieved_eur = actual_net_native / asset_fx_mult
-        return achieved_eur
+    # IBKR lot ledger: [weighted-average acquisition year, weight]. Additions update the
+    # weighted year; pro-rata draws scale the weight and leave the average unchanged. This
+    # lets IBKR lots AGE into the Slovenian holding-period schedule like the legacy lots,
+    # instead of paying a flat rate forever. (Tier-2 fix #13.)
+    ibkr_lot = [2026.0, 0.0]
+    reset_done = False
+    exit_tax_done = False
 
     for yr in range(2026, 2090):
         age = st.session_state.current_age + (yr - 2026)
-        
+
         usd_yr_return = st.session_state.usd_market_return / 100.0
         eur_yr_return = st.session_state.eur_market_return / 100.0
         i_rate = st.session_state.inflation_rate / 100.0
 
-        # Monte Carlo: replace the deterministic base return with this path's stochastic
-        # draw for the year. Glide-path de-risking below still applies on top.
         if return_overrides is not None and yr in return_overrides:
             usd_yr_return, eur_yr_return = return_overrides[yr]
         if sc_returns is not None and yr in sc_returns:
-            usd_yr_return, eur_yr_return = sc_returns[yr]
-        # Multi-factor MC: per-year stochastic inflation and FX.
+            usd_yr_return, eur_yr_return = sc_returns[yr][0], sc_returns[yr][1]
         if sc_inflation is not None and yr in sc_inflation:
             i_rate = sc_inflation[yr]
-        fx_mult_global = sc_fx[yr] if (sc_fx is not None and yr in sc_fx) else fx_mult_base
+        # EUR/USD spot for the year (USD per EUR). Defined in BOTH phases: it prices any
+        # conversion event pre-move and all cross-currency funding post-move.
+        fx_spot = sc_fx[yr] if (sc_fx is not None and yr in sc_fx) else fx_base
 
-        # Compound the realized inflation path into a CPI index (1.0 at 2026 base year).
         if yr > 2026:
             cpi_index *= (1 + i_rate)
-        
-        # Bond sleeve return for the year (EUR-denominated). Deterministic default is the
-        # bond mean; the Monte Carlo overrides this with a stochastic draw correlated with
-        # equities (see scenario['bond'] / return_overrides bond channel).
+
         bond_return = st.session_state.bond_mean / 100.0
-        if sc_returns is not None and yr in sc_returns and isinstance(sc_returns[yr], (list, tuple)) and len(sc_returns[yr]) >= 3:
-            usd_yr_return, eur_yr_return, bond_return = sc_returns[yr][0], sc_returns[yr][1], sc_returns[yr][2]
         if sc_bond is not None and yr in sc_bond:
             bond_return = sc_bond[yr]
 
-        # Inflation-linked bond sleeve (static fraction). The linker portion returns its real
-        # yield plus THIS YEAR'S realized inflation (i_rate), so it holds real value exactly
-        # when inflation spikes -- the honest, always-on hedge. The nominal portion keeps the
-        # drawn/assumed nominal bond return. This is NOT regime-switched: the same linker
-        # fraction applies every year, so the model pays the calm-year drag and reaps the
-        # high-inflation protection, showing both sides of the tradeoff.
-        if st.session_state.get('linker_enable', False):
-            lf = st.session_state.get('linker_frac', 0.0)
-            linker_return = st.session_state.get('linker_real_yield', 1.0) / 100.0 + i_rate
+        # Inflation-linked sleeve inside the bond bucket (real yield + realized inflation)
+        if st.session_state.get('linker_enable', False) and st.session_state.get('linker_frac', 0.0) > 0:
+            lf = st.session_state.linker_frac
+            linker_return = (st.session_state.get('linker_real_yield', 1.0) / 100.0) + i_rate
             bond_return = (1 - lf) * bond_return + lf * linker_return
 
-        # Equity weight for the year. Allocation-based glide (preferred): linearly shift the
-        # equity weight from glide_eq_start to glide_eq_end across the de-risking window.
-        # Bonds fill the remainder. This blends each sleeve's EQUITY return with the BOND
-        # return, so de-risking lowers both the mean and the realized volatility.
-        if st.session_state.glide_enable and st.session_state.glide_alloc_mode:
+        # Bifurcated glide path
+        if st.session_state.glide_enable and st.session_state.get('glide_alloc_mode', True):
             if age <= st.session_state.glide_start_age:
                 w_eq = st.session_state.glide_eq_start
             elif age >= st.session_state.glide_end_age:
@@ -941,58 +1066,98 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
             else:
                 frac = (age - st.session_state.glide_start_age) / max(1, (st.session_state.glide_end_age - st.session_state.glide_start_age))
                 w_eq = st.session_state.glide_eq_start + frac * (st.session_state.glide_eq_end - st.session_state.glide_eq_start)
-            # Blend: each sleeve becomes w_eq * its equity return + (1-w_eq) * EUR bond return.
-            # Note: bonds are EUR-denominated throughout. Post-move (ages 56-100, the bulk of
-            # the horizon) this is exactly right since spending is EUR. Pre-move (the 1-2 US
-            # years) the EUR-bond slice of USD accounts carries minor untranslated FX risk;
-            # the effect is small given the short window and high equity weight early, and is
-            # left as a documented approximation rather than full bond-sleeve FX translation.
             usd_yr_return = w_eq * usd_yr_return + (1 - w_eq) * bond_return
             eur_yr_return = w_eq * eur_yr_return + (1 - w_eq) * bond_return
         elif st.session_state.glide_enable and age >= st.session_state.glide_start_age:
-            # Legacy return-haircut glide (only if allocation mode is off).
             years_in_glide = min(age, st.session_state.glide_end_age) - st.session_state.glide_start_age + 1
             usd_yr_return -= (years_in_glide * (st.session_state.usd_glide_reduction / 100.0))
             eur_yr_return -= (years_in_glide * (st.session_state.eur_glide_reduction / 100.0))
-            
+
         if st.session_state.sorr_enable and (st.session_state.sorr_start_yr <= yr < (st.session_state.sorr_start_yr + st.session_state.sorr_duration)):
             usd_yr_return = st.session_state.sorr_return / 100.0
             eur_yr_return = st.session_state.sorr_return / 100.0
 
+        is_slovenia = (yr >= move_yr)
+        col_ratio = col_in if is_slovenia else 1.0           # euros per $1 of US-equivalent lifestyle
+        usd_to_sc = (1.0 / fx_spot) if is_slovenia else 1.0  # spending-ccy units per USD
+        sc_to_usd = fx_spot if is_slovenia else 1.0          # USD per spending-ccy unit
+
+        def _ibkr_add(amount_eur):
+            if amount_eur <= 0:
+                return
+            w = ibkr_lot[1]
+            ibkr_lot[0] = (ibkr_lot[0] * w + yr * amount_eur) / (w + amount_eur)
+            ibkr_lot[1] = w + amount_eur
+
+        div_tax_usd_yr = [0.0]
+
+        def _apply_return_with_divs(asset):
+            # Apply the year's return; for taxable dividend-paying sleeves, tax the
+            # dividend annually (US qualified rate pre-move; Slovenia's flat 25% -- with
+            # the residual US layer for citizens -- post-move). Net dividends are
+            # reinvested, so basis rises by the net amount. (Tier-2 fix #15.)
+            if asset == "Cash (Slush Fund)":
+                ret = 0.0
+            elif asset == "IBKR (Active)":
+                ret = eur_yr_return
+            else:
+                ret = usd_yr_return
+            bal = current_balances[asset]
+            if div_on and asset in DIV_ASSETS and bal > 0:
+                div_native = bal * div_y
+                if is_slovenia:
+                    drate = max(0.25, us_ltcg) if citizen else 0.25
+                else:
+                    drate = us_ltcg
+                dtax = div_native * drate * sc_tax_mult
+                current_balances[asset] = bal * (1 + ret) - dtax
+                current_basis[asset] += max(0.0, div_native - dtax)
+                div_tax_usd_yr[0] += dtax * (fx_spot if asset in EUR_ASSETS else 1.0)
+            else:
+                current_balances[asset] = bal * (1 + ret)
+
+        def _usd_equiv_total():
+            # Tier-1 fix #2: aggregates translate EUR sleeves at the year's spot rate
+            # instead of summing euros and dollars 1:1.
+            return sum(b * (fx_spot if a in EUR_ASSETS else 1.0) for a, b in current_balances.items())
+
+        # ---------------------------------------------------------------------
+        # ACCUMULATION PHASE
+        # ---------------------------------------------------------------------
         if yr < start_yr:
             yr_conts = {}
             for asset in current_balances.keys():
                 if asset in policy.index:
                     esc = policy.loc[asset, "Annual Savings Escalator (%)"] / 100.0
-                    curr_cont = policy.loc[asset, "Current State"] * ((1 + esc)**(yr - 2026))
-                    nb_cont = policy.loc[asset, "Northbrook Grind"] * ((1 + esc)**(yr - 2026))
+                    curr_cont = policy.loc[asset, "Current State"] * ((1 + esc) ** (yr - 2026))
+                    nb_cont = policy.loc[asset, "Northbrook Grind"] * ((1 + esc) ** (yr - 2026))
                     cont = curr_cont if yr < st.session_state.nb_start_yr else nb_cont
-                else: cont = 0
-                
-                if asset == "Cash (Slush Fund)": asset_ret = 0.0
-                elif asset == "IBKR (Active)": asset_ret = eur_yr_return
-                else: asset_ret = usd_yr_return
-                
+                else:
+                    cont = 0
+                _apply_return_with_divs(asset)
                 yr_conts[asset] = cont
-                current_balances[asset] = current_balances[asset] * (1 + asset_ret) + cont
-                current_basis[asset] += cont 
-                
+                if asset in EUR_ASSETS:
+                    cont_native = cont / fx_spot  # USD savings buy euros at spot
+                    if asset == "IBKR (Active)":
+                        _ibkr_add(cont_native)
+                else:
+                    cont_native = cont
+                current_balances[asset] += cont_native
+                current_basis[asset] += cont_native
+
             cont_matrix[yr] = yr_conts
-            bal_col = current_balances.copy()
-            bal_col["Total Portfolio Balance"] = sum(current_balances.values())
+            bal_col = {a: b * (fx_spot if a in EUR_ASSETS else 1.0) for a, b in current_balances.items()}
+            bal_col["Total Portfolio Balance"] = sum(bal_col.values())
             bal_matrix[yr] = bal_col
             continue
-            
+
+        # ---------------------------------------------------------------------
+        # ONE-TIME EVENTS (balance moves happen pre-returns, as before; their
+        # TAXES are computed below once the year's tax machinery exists)
+        # ---------------------------------------------------------------------
+        pending_sweep_ordinary_usd = 0.0
+        pending_event_flat_tax_usd = 0.0
         if yr == start_yr:
-            if st.session_state.execute_great_reset:
-                sweep_val = current_balances["Cornerstone: Roth 401(k)"] + current_balances["OCC: Roth 401(k)"]
-                current_balances["IBKR (Active)"] += sweep_val
-                current_basis["IBKR (Active)"] += sweep_val 
-                current_balances["Cornerstone: Roth 401(k)"] = 0
-                current_balances["OCC: Roth 401(k)"] = 0
-                current_basis["Cornerstone: Roth 401(k)"] = 0
-                current_basis["OCC: Roth 401(k)"] = 0
-            
             holding_years = max(0, start_yr - st.session_state.nb_start_yr)
             if holding_years > 0:
                 principal = st.session_state.home_price - st.session_state.down_payment
@@ -1000,47 +1165,78 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
                 n_mtg = 30 * 12
                 end_prop_val = st.session_state.home_price * ((1 + (st.session_state.ann_apprec / 100)) ** holding_years)
                 pmts_made = holding_years * 12
-                if r_mtg > 0: end_mtg_bal = principal * (((1 + r_mtg)**n_mtg - (1 + r_mtg)**pmts_made) / ((1 + r_mtg)**n_mtg - 1))
-                else: end_mtg_bal = principal - ((principal / n_mtg) * pmts_made)
+                if r_mtg > 0:
+                    end_mtg_bal = principal * (((1 + r_mtg) ** n_mtg - (1 + r_mtg) ** pmts_made) / ((1 + r_mtg) ** n_mtg - 1))
+                else:
+                    end_mtg_bal = principal - ((principal / n_mtg) * pmts_made)
                 net_proceeds = max(0, end_prop_val - end_mtg_bal - (end_prop_val * 0.06))
-            else: net_proceeds = 0
-                
-            half_proceeds = net_proceeds / 2
-            current_balances["IBKR (Active)"] += half_proceeds 
-            current_basis["IBKR (Active)"] += half_proceeds 
-            current_balances["Cash (Slush Fund)"] += half_proceeds 
-            current_basis["Cash (Slush Fund)"] += half_proceeds 
+            else:
+                net_proceeds = 0
+            # USD proceeds buy euros at the year's spot rate (no more par conversion).
+            half_eur = (net_proceeds / 2.0) / fx_spot
+            current_balances["IBKR (Active)"] += half_eur
+            current_basis["IBKR (Active)"] += half_eur
+            _ibkr_add(half_eur)
+            current_balances["Cash (Slush Fund)"] += half_eur
+            current_basis["Cash (Slush Fund)"] += half_eur
 
-        is_slovenia = (yr >= move_yr)
-        current_fx = fx_mult_global if is_slovenia else 1.0
-        
-        # Apply Returns for the year
+        if st.session_state.execute_great_reset and not reset_done and yr >= start_yr:
+            do_sweep = (age >= 60) if reset_defer else (yr == start_yr)
+            if do_sweep:
+                sweep_val = sum(current_balances[r] for r in ROTH_ACCOUNTS)
+                sweep_basis = sum(current_basis[r] for r in ROTH_ACCOUNTS)
+                sweep_earnings = max(0.0, sweep_val - sweep_basis)
+                if sweep_val > 0:
+                    if age < 60:
+                        # NON-QUALIFIED Roth 401(k) distribution (59.5 rule): the earnings
+                        # slice is US ordinary income PLUS a 10% early-withdrawal penalty.
+                        # The old model treated this sweep as tax-free, which is only true
+                        # at 59.5+. (Tier-1 fix #4.)
+                        pending_sweep_ordinary_usd = sweep_earnings
+                        pending_event_flat_tax_usd += 0.10 * sweep_earnings * sc_tax_mult
+                    if is_slovenia:
+                        # Post-move sweep: under the model's own Roth-Trap assumption,
+                        # Slovenia taxes the distribution.
+                        pending_event_flat_tax_usd += sweep_val * (st.session_state.tax_roth / 100.0) * sc_tax_mult
+                    sweep_eur = sweep_val / fx_spot
+                    current_balances["IBKR (Active)"] += sweep_eur
+                    current_basis["IBKR (Active)"] += sweep_eur
+                    _ibkr_add(sweep_eur)
+                    for r in ROTH_ACCOUNTS:
+                        current_balances[r] = 0
+                        current_basis[r] = 0
+                reset_done = True
+
+        # Apply returns (with annual dividend taxation on taxable sleeves)
         for asset in current_balances.keys():
-            if asset == "Cash (Slush Fund)": pass 
-            elif asset == "IBKR (Active)": current_balances[asset] *= (1 + eur_yr_return)
-            else: current_balances[asset] *= (1 + usd_yr_return)
-            
-        current_portfolio = sum(current_balances.values())
-        
-        # 1. Baseline Target Determination
-        if age < 70: 
+            _apply_return_with_divs(asset)
+
+        current_portfolio = _usd_equiv_total()
+
+        # 1. Baseline Target Determination (today's USD purchasing power, CPI-inflated)
+        if age < 70:
             base_spend_usd = st.session_state.spend_golden
             floor_base_usd = st.session_state.floor_golden
-        elif age < 85: 
+        elif age < 85:
             base_spend_usd = st.session_state.spend_middle
             floor_base_usd = st.session_state.floor_middle
-        else: 
+        else:
             base_spend_usd = st.session_state.spend_wind
             floor_base_usd = st.session_state.floor_wind
-            
+
         target_lifestyle_usd = base_spend_usd * cpi_index
         floor_usd_inflated = floor_base_usd * cpi_index
-        
+        # USD-equivalent COST of that lifestyle: translate the basket to euros via the
+        # cost-of-living ratio, then back to dollars at the year's spot rate. A stronger
+        # euro RAISES the dollar cost of the Slovenian life -- the correct risk direction.
+        target_cost_usd_equiv = target_lifestyle_usd * col_ratio * sc_to_usd
+
         ss_m, ss_s = MIKE_SS.get(yr, 0), STEPH_SS.get(yr, 0)
         # Survivor scenario: after the FIRST death, the survivor keeps the LARGER of the two
         # benefits and the smaller one is lost entirely. (If both haven't yet claimed when
         # the first death occurs, the larger eventual stream is what carries forward.)
         in_survivor_phase = (sc_first_death_year is not None and yr > sc_first_death_year)
+        filing_single = in_survivor_phase and st.session_state.survivor_enable
         if in_survivor_phase:
             gross_ss_usd = max(ss_m, ss_s) * (1 - sc.get('ss_haircut', 0.0))
         else:
@@ -1048,63 +1244,128 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         # US tax on SS persists even after the move under the treaty's savings clause
         # (US taxes its citizens under normal US rules regardless of residence).
         taxable_ss_usd = gross_ss_usd * (st.session_state.ss_taxable_pct / 100.0) if gross_ss_usd > 0 else 0.0
-        # Widow's penalty: a survivor files SINGLE (roughly half-width US brackets, smaller
-        # standard deduction), so the same income is taxed harder. Modeled as a multiplier
-        # on the US tax rate during the survivor phase (default ~1.18, ~+$3,700/yr scale).
-        widow_mult = st.session_state.survivor_tax_surcharge if (in_survivor_phase and st.session_state.survivor_enable) else 1.0
-        us_ss_tax_usd = taxable_ss_usd * (st.session_state.us_ss_tax_rate / 100.0) * sc_tax_mult * widow_mult
+        if progressive:
+            # Taxable SS runs through the real US brackets; a survivor files SINGLE
+            # (half-width brackets, half the deduction), which IS the widow's penalty --
+            # no flat surcharge needed in this mode.
+            us_ss_tax_usd = us_ordinary_tax(taxable_ss_usd, cpi_index, filing_single) * sc_tax_mult
+        else:
+            widow_mult = st.session_state.survivor_tax_surcharge if filing_single else 1.0
+            us_ss_tax_usd = taxable_ss_usd * (st.session_state.us_ss_tax_rate / 100.0) * sc_tax_mult * widow_mult
         # Slovenia (residence country) may levy additional tax once resident; model the
         # NET incremental amount after US foreign-tax-credit offset (default 0).
         sl_ss_tax_usd = (gross_ss_usd * (st.session_state.sl_ss_net_rate / 100.0)) if (gross_ss_usd > 0 and is_slovenia) else 0.0
         irs_shadow_tax_usd = us_ss_tax_usd + sl_ss_tax_usd
         net_ss_usd = gross_ss_usd - irs_shadow_tax_usd
-        
+
+        # ---------------------------------------------------------------------
+        # ORDINARY-INCOME TAX MACHINERY for the year (Tier-1 fix #3).
+        # Progressive mode (default): every dollar of ordinary income (pre-tax
+        # draws, RMDs, conversions, sweep earnings) stacks on top of taxable SS
+        # through the US brackets, and through Slovenia's brackets once resident;
+        # the combined liability is max(US, SI) -- the savings-clause + FTC
+        # outcome. Previously the entire tax-smoothing draw was charged a flat
+        # 16% base rate. Legacy mode keeps the flat base/excess rates but now
+        # applies the standard-deduction split to EVERY ordinary draw (the
+        # smoothing draw included).
+        # ---------------------------------------------------------------------
+        if progressive:
+            _tallies = {'us': taxable_ss_usd, 'si': 0.0}
+
+            def _ord_total(us_t, si_t):
+                us = us_ordinary_tax(us_t, cpi_index, filing_single)
+                if is_slovenia:
+                    return max(us, si_ordinary_tax(si_t, cpi_index) * fx_spot)
+                return us
+
+            def ordinary_tax_for(gross_usd):
+                if gross_usd <= 0:
+                    return 0.0
+                before = _ord_total(_tallies['us'], _tallies['si'])
+                after = _ord_total(_tallies['us'] + gross_usd,
+                                   _tallies['si'] + (gross_usd / fx_spot if is_slovenia else 0.0))
+                return max(0.0, after - before) * sc_tax_mult
+
+            def commit_ordinary(gross_usd):
+                t = ordinary_tax_for(gross_usd)
+                _tallies['us'] += gross_usd
+                if is_slovenia:
+                    _tallies['si'] += gross_usd / fx_spot
+                return t
+        else:
+            _legacy_drip_r = ((st.session_state.tax_pretax_base / 100.0) if is_slovenia else 0.12) * sc_tax_mult
+            _legacy_high_r = ((st.session_state.tax_pretax_excess / 100.0) if is_slovenia else 0.22) * sc_tax_mult
+            _std_left = [30000 * cpi_index]
+
+            def ordinary_tax_for(gross_usd):
+                if gross_usd <= 0:
+                    return 0.0
+                b = min(gross_usd, _std_left[0])
+                return b * _legacy_drip_r + (gross_usd - b) * _legacy_high_r
+
+            def commit_ordinary(gross_usd):
+                t = ordinary_tax_for(gross_usd)
+                _std_left[0] = max(0.0, _std_left[0] - gross_usd)
+                return t
+
+        def _gross_for_net_usd(net_usd):
+            # Invert net = gross - tax(gross) by fixed-point iteration (marginal < 1).
+            if net_usd <= 0:
+                return 0.0
+            g = net_usd / 0.7
+            for _ in range(12):
+                g = net_usd + ordinary_tax_for(g)
+            return g
+
+        roth_tax_rate = ((st.session_state.tax_roth / 100.0) if is_slovenia else 0.0) * sc_tax_mult
+        legacy_lot_rate = legacy_cg_rate(yr - 2026, is_slovenia) * sc_tax_mult
+        if ibkr_aging:
+            ibkr_rate = legacy_cg_rate(max(0.0, yr - ibkr_lot[0]), is_slovenia) * sc_tax_mult
+        else:
+            ibkr_rate = ((st.session_state.tax_cap_gains / 100.0) if is_slovenia else 0.15) * sc_tax_mult
+
         # 2. Dynamic Gifting Math (Smoothed Recalibrating Annuity)
         # The forward "terminal pie" projection uses the assumed long-run return
-        # (plan_return), NOT the realized/stochastic return for the year. This mirrors how
-        # a real planner extrapolates: they don't assume one lucky (or terrible) year will
-        # repeat to age 100. The actual portfolio balance still compounds at the realized
-        # return (usd_yr_return) elsewhere; only this forward-looking gift sizing is
-        # decoupled, which removes the single-year gift jumpiness in Monte Carlo paths.
+        # (plan_return), NOT the realized/stochastic return for the year. Draws and the
+        # portfolio are USD-equivalents so the projection is in one consistent unit.
         base_gift_usd = 0
         if st.session_state.gifting_enable and st.session_state.gift_start_age <= age <= st.session_state.gift_end_age:
             plan_return = st.session_state.usd_market_return / 100.0
             n_total = 100 - age
-            approx_annual_draw = max(0, target_lifestyle_usd - net_ss_usd)
-            
+            approx_annual_draw = max(0, target_cost_usd_equiv - net_ss_usd)
+
             if plan_return == i_rate:
-                fv_draws = approx_annual_draw * n_total * (1+plan_return)**(n_total - 1)
+                fv_draws = approx_annual_draw * n_total * (1 + plan_return) ** (n_total - 1)
             else:
-                fv_draws = approx_annual_draw * (((1+plan_return)**n_total - (1+i_rate)**n_total) / (plan_return - i_rate))
-                
-            # Add back the FV of past gifts to find the TRUE "No-Gift" Terminal Pie
-            fv_past_gifts = cumulative_gifts_tracker * (1 + plan_return)**n_total
-            total_fv_nogift = max(0, (current_portfolio * (1+plan_return)**n_total) - fv_draws + fv_past_gifts)
-            
+                fv_draws = approx_annual_draw * (((1 + plan_return) ** n_total - (1 + i_rate) ** n_total) / (plan_return - i_rate))
+
+            fv_past_gifts = cumulative_gifts_tracker * (1 + plan_return) ** n_total
+            total_fv_nogift = max(0, (current_portfolio * (1 + plan_return) ** n_total) - fv_draws + fv_past_gifts)
+
             target_total_gift_fv = (st.session_state.dynamic_gift_pct / 100.0) * total_fv_nogift
             remaining_gift_fv_needed = max(0, target_total_gift_fv - fv_past_gifts)
-            
+
             n_rem_gifts = st.session_state.gift_end_age - age + 1
             if n_rem_gifts > 0 and plan_return > 0:
-                fvifa = (((1+plan_return)**n_rem_gifts) - 1) / plan_return
-                growth_after_gifts = (1+plan_return)**(100 - st.session_state.gift_end_age)
+                fvifa = (((1 + plan_return) ** n_rem_gifts) - 1) / plan_return
+                growth_after_gifts = (1 + plan_return) ** (100 - st.session_state.gift_end_age)
                 base_gift_usd = remaining_gift_fv_needed / (fvifa * growth_after_gifts)
-                
-        # 3. Guardrails Logic
-        # Calculate Withdrawal Rate based on Lifestyle Draw only to test against Guardrails
+
+        # 3. Guardrails Logic -- withdrawal rate tested in consistent USD-equivalents
+        # (EUR sleeves translated at spot in current_portfolio; the lifestyle draw is the
+        # USD-equivalent COST of the euro basket).
         current_wr = 0.0
         if current_portfolio > 0:
-            eval_lifestyle_draw = max(0, (target_lifestyle_usd * spend_level) - net_ss_usd)
+            eval_lifestyle_draw = max(0, (target_cost_usd_equiv * spend_level) - net_ss_usd)
             current_wr = eval_lifestyle_draw / current_portfolio
-            
+
             if st.session_state.guardrails_enable:
                 if current_wr > (st.session_state.slash_trigger / 100.0):
                     floor_level = floor_usd_inflated / target_lifestyle_usd
                     spend_level = floor_level
                 elif current_wr < (st.session_state.recovery_trigger / 100.0) and spend_level < 1.0:
                     # Restoration rate combines the chosen raise with inflation so the
-                    # spend_level ratio recovers in real terms (target_lifestyle is
-                    # already inflating, so a pure raise_pct would lag by inflation).
+                    # spend_level ratio recovers in real terms.
                     recovery_rate = (st.session_state.raise_pct + st.session_state.inflation_rate) / 100.0
                     spend_level = min(1.0, spend_level * (1 + recovery_rate))
         else:
@@ -1115,52 +1376,71 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         actual_gift_usd = base_gift_usd * spend_level
 
         # Survivor scenario: between the first and second death, a surviving single person
-        # spends less than the couple did, but NOT half (housing, utilities, a car don't
-        # halve). Apply the survivor expense ratio (default ~75%) to lifestyle. Gifting
-        # continues at the couple's intended pace (it's a bequest goal, not consumption).
+        # spends less than the couple did, but NOT half. Gifting continues at the couple's
+        # intended pace (it's a bequest goal, not consumption).
         if (st.session_state.survivor_enable and in_survivor_phase
                 and not (sc_death_year is not None and yr > sc_death_year)):
             actual_lifestyle_usd *= st.session_state.survivor_expense_ratio
 
-        # Longevity: after both spouses have died, the household no longer spends or gifts
-        # (the estate phase). The portfolio simply grows to the bequest.
+        # Longevity: after both spouses have died, the household no longer spends or gifts.
         if sc_death_year is not None and yr > sc_death_year:
             actual_lifestyle_usd = 0.0
             actual_gift_usd = 0.0
 
-        # Long-term-care shock: an extra real (2026 $) cost layered on, inflated to nominal.
+        # Long-term-care shock: extra real (2026 $) cost, inflated to nominal. It is part
+        # of the consumption basket, so it shares the cost-of-living translation below.
         ltc_extra_usd = sc_ltc.get(yr, 0.0) * cpi_index if sc_ltc else 0.0
         actual_lifestyle_usd += ltc_extra_usd
-        
-        # Capture actual WR for tracking (incorporating newly slashed level if applicable)
-        final_eval_draw = max(0, actual_lifestyle_usd - net_ss_usd)
+
+        # Capture actual WR for tracking (USD-equivalent cost of the actual basket)
+        actual_cost_usd_equiv = actual_lifestyle_usd * col_ratio * sc_to_usd
+        final_eval_draw = max(0, actual_cost_usd_equiv - net_ss_usd)
         final_wr = final_eval_draw / current_portfolio if current_portfolio > 0 else 0.0
         wr_matrix[yr] = final_wr
-        
-        # Update phantom ledger for next year's smoothed calculation
-        cumulative_gifts_tracker = cumulative_gifts_tracker * (1 + usd_yr_return) + actual_gift_usd
-        
-        # Spend inputs are denominated in today's USD purchasing power. Convert to the
-        # euros actually needed in Slovenia by dividing by the FX multiplier (current_fx is
-        # 1.0 pre-move, the EUR-funding rate post-move). Slovenia's lower price level then
-        # surfaces naturally as lifestyle headroom rather than a separate PPP discount.
-        # This now matches how gifts and SS are already converted (previously lifestyle was
-        # inconsistently spent 1:1 as euros after the move).
-        target_lifestyle_eur = actual_lifestyle_usd / current_fx
-        gift_need_eur = actual_gift_usd / current_fx
-        ss_eur_equivalent = net_ss_usd / current_fx
-        
-        remaining_eur_need = max(0, (target_lifestyle_eur + gift_need_eur) - ss_eur_equivalent)
 
-        pretax_accounts = ["Cornerstone: Trad 401(k)", "OCC: Trad 401(k)", "Cornerstone: Profit Sharing"]
+        # Update phantom ledger for next year's smoothed gift calculation
+        cumulative_gifts_tracker = cumulative_gifts_tracker * (1 + usd_yr_return) + actual_gift_usd
+
+        # ---------------------------------------------------------------------
+        # SPENDING NEEDS in the SPENDING CURRENCY (euros post-move, dollars before).
+        # Lifestyle is a CONSUMPTION BASKET: translated by the cost-of-living ratio
+        # (price level), NOT by the exchange rate. SS and gifts are USD cash flows:
+        # converted at the year's spot rate. The FX rate therefore only prices
+        # currency crossings -- the economically correct transmission.
+        # ---------------------------------------------------------------------
+        lifestyle_sc = actual_lifestyle_usd * col_ratio
+        gift_sc = actual_gift_usd * usd_to_sc
+        ss_sc = net_ss_usd * usd_to_sc
+        remaining_need_sc = max(0, (lifestyle_sc + gift_sc) - ss_sc)
+
+        # ---------------------------------------------------------------------
+        # ONE-TIME EVENT TAXES, funded through the waterfall.
+        # ---------------------------------------------------------------------
+        event_tax_usd = 0.0
+        if pending_sweep_ordinary_usd > 0:
+            event_tax_usd += commit_ordinary(pending_sweep_ordinary_usd)
+        event_tax_usd += pending_event_flat_tax_usd
+        if (not citizen) and (not exit_tax_done) and yr >= move_yr:
+            # IRC 877A covered-expatriate EXIT TAX (Tier-2 fix #16): renouncing
+            # citizenship triggers a deemed sale of taxable lots; gains above the
+            # exclusion are taxed at US LTCG and basis steps up to market. Renouncing
+            # is no longer free.
+            unrealized_usd = 0.0
+            for a in TAXABLE_ACCOUNTS:
+                fxm = fx_spot if a in EUR_ASSETS else 1.0
+                unrealized_usd += max(0.0, current_balances[a] - current_basis[a]) * fxm
+            exclusion = EXIT_TAX_EXCLUSION_USD * cpi_index
+            exit_tax = max(0.0, unrealized_usd - exclusion) * us_ltcg * sc_tax_mult
+            event_tax_usd += exit_tax
+            for a in TAXABLE_ACCOUNTS:
+                current_basis[a] = max(current_basis[a], current_balances[a])
+            exit_tax_done = True
+        remaining_need_sc += event_tax_usd * usd_to_sc
 
         # --- Roth Conversion Ladder ---
-        # Determine this year's pre-tax -> Roth conversion (today's USD, inflated to nominal).
-        # Conversion is US-taxable ordinary income ALWAYS; post-move it is ALSO taxed by
-        # Slovenia (the double-hit modeled per user choice). The conversion tax is added to
-        # the year's cash need and funded through the normal waterfall; the converted
-        # principal moves from pre-tax balances into the Roth sleeve net of nothing (tax is
-        # paid from other assets, the standard "pay conversion tax from outside" best practice).
+        # Conversion is US-taxable ordinary income ALWAYS; post-move it is ALSO inside the
+        # Slovenian base (the double-hit). In progressive mode it stacks through the real
+        # brackets on top of SS and the smoothing draw; the tax is funded from other assets.
         if sc_roth_conv is not None:
             rc_annual, rc_start, rc_end = sc_roth_conv
         else:
@@ -1170,155 +1450,194 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         conversion_tax_usd = 0.0
         if rc_annual > 0 and rc_start <= age <= rc_end:
             conv_nominal = rc_annual * cpi_index
-            pretax_avail = sum(current_balances[p] for p in pretax_accounts if current_balances[p] > 0)
+            pretax_avail = sum(current_balances[p] for p in PRETAX_ACCOUNTS if current_balances[p] > 0)
             conv_amt = min(conv_nominal, pretax_avail)
             if conv_amt > 0:
-                # Move principal pre-tax -> Roth, pro-rata across pre-tax accounts.
                 roth_target = "Cornerstone: Roth 401(k)"
-                for p in pretax_accounts:
+                for p in PRETAX_ACCOUNTS:
                     if current_balances[p] > 0:
                         share = conv_amt * (current_balances[p] / pretax_avail)
                         current_balances[p] -= share
                 current_balances[roth_target] += conv_amt
                 current_basis[roth_target] += conv_amt
-                # Tax on conversion: US ordinary rate always; + Slovenian ordinary rate if resident.
-                us_conv_rate = (st.session_state.roth_conv_us_rate / 100.0)
-                sl_conv_rate = (st.session_state.tax_pretax_base / 100.0) if is_slovenia else 0.0
-                conversion_tax_usd = conv_amt * (us_conv_rate + sl_conv_rate) * sc_tax_mult
-                # Fund the conversion tax through the normal drawdown waterfall (in EUR terms).
-                remaining_eur_need += conversion_tax_usd / current_fx
+                if progressive:
+                    conversion_tax_usd = commit_ordinary(conv_amt)
+                else:
+                    us_conv_rate = (st.session_state.roth_conv_us_rate / 100.0)
+                    sl_conv_rate = (st.session_state.tax_pretax_base / 100.0) if is_slovenia else 0.0
+                    conversion_tax_usd = conv_amt * (us_conv_rate + sl_conv_rate) * sc_tax_mult
+                remaining_need_sc += conversion_tax_usd * usd_to_sc
 
+        # ---------------------------------------------------------------------
+        # DRAWDOWN WATERFALL
+        # ---------------------------------------------------------------------
         draws, taxes = {a: 0.0 for a in asset_rows}, {a: 0.0 for a in asset_rows}
-        
-        roth_tax_rate = ((st.session_state.tax_roth / 100.0) if is_slovenia else 0.0) * sc_tax_mult
-        pretax_drip_rate = ((st.session_state.tax_pretax_base / 100.0) if is_slovenia else 0.12) * sc_tax_mult
-        pretax_high_rate = ((st.session_state.tax_pretax_excess / 100.0) if is_slovenia else 0.22) * sc_tax_mult
-        ibkr_rate = ((st.session_state.tax_cap_gains / 100.0) if is_slovenia else 0.15) * sc_tax_mult
 
-        # Slovenian graduated capital-gains schedule by holding period (years held).
-        # 0-5y: 25%, 5-10y: 20%, 10-15y: 15%, >15y: 0%. Applies once resident in
-        # Slovenia; before the move, US capital-gains rules apply (taxed on the gain).
-        # E*TRADE/Crypto seed lots are treated as acquired in 2026 (per user choice),
-        # so holding period = yr - 2026.
-        #
-        # Residual US tax layer (treaty savings clause): as US citizens, the US still
-        # taxes these gains. Slovenia's tax is credited dollar-for-dollar (FTC), so the
-        # effective combined rate is max(Slovenia rate, US LTCG rate). When Slovenia is
-        # 0% (>15y holding), the FULL US LTCG rate still applies — the sale is NOT
-        # tax-free. Set retain_us_citizenship=False to model renouncing (Slovenia only).
-        def slovenia_graduated_rate(years_held):
-            if years_held > 15: return 0.0
-            elif years_held > 10: return 0.15
-            elif years_held > 5:  return 0.20
-            else:                 return 0.25
-        def legacy_cg_rate(years_held):
-            if not is_slovenia:
-                return st.session_state.us_ltcg_rate / 100.0  # US LTCG pre-move (gain-based)
-            sl_rate = slovenia_graduated_rate(years_held)
-            if st.session_state.retain_us_citizenship:
-                # FTC: owe the higher of the two; Slovenian tax credits against US tax.
-                return max(sl_rate, st.session_state.us_ltcg_rate / 100.0)
-            return sl_rate
-        legacy_lot_rate = legacy_cg_rate(yr - 2026)
+        def draw_pretax_gross(asset, gross_usd):
+            # Mandatory/targeted GROSS ordinary draw (RMDs, smoothing); returns net USD.
+            if gross_usd <= 0 or current_balances[asset] <= 0:
+                return 0.0
+            g = min(gross_usd, current_balances[asset])
+            t = commit_ordinary(g)
+            draws[asset] += g
+            taxes[asset] += t
+            current_balances[asset] -= g
+            return g - t
 
-        pre_req_eur_generated = 0.0
-        
+        def pull_net_pretax(asset, need_sc):
+            # Draw enough GROSS ordinary income to net `need_sc` in spending currency.
+            if need_sc <= 0 or current_balances[asset] <= 0:
+                return 0.0
+            need_usd = need_sc * sc_to_usd
+            g = min(_gross_for_net_usd(need_usd), current_balances[asset])
+            t = commit_ordinary(g)
+            draws[asset] += g
+            taxes[asset] += t
+            current_balances[asset] -= g
+            return (g - t) * usd_to_sc
+
+        def pull_net_flat(asset, need_sc, statutory_rate, is_brokerage):
+            # Flat/schedular-rate draw (Roth trap rate, capital-gains schedules, cash).
+            # Native units per 1 unit of spending currency price the currency crossing.
+            if need_sc <= 0 or current_balances[asset] <= 0:
+                return 0.0
+            is_eur = asset in EUR_ASSETS
+            if is_slovenia:
+                native_per_sc = 1.0 if is_eur else fx_spot
+            else:
+                native_per_sc = (1.0 / fx_spot) if is_eur else 1.0
+            req_net_native = need_sc * native_per_sc
+            if is_brokerage:
+                gain_ratio = max(0.0, (current_balances[asset] - current_basis[asset]) / current_balances[asset])
+                eff = statutory_rate * gain_ratio
+            else:
+                eff = statutory_rate
+            req_gross = req_net_native / (1 - eff) if eff < 1 else req_net_native
+            g = min(req_gross, current_balances[asset])
+            t = g * eff
+            n = g - t
+            draws[asset] += g
+            taxes[asset] += t
+            portion = g / current_balances[asset]
+            current_basis[asset] -= current_basis[asset] * portion
+            if asset == "IBKR (Active)":
+                ibkr_lot[1] *= (1 - portion)
+            current_balances[asset] -= g
+            return n / native_per_sc
+
+        pre_req_sc_generated = 0.0
+
         if age >= 75:
+            # RMDs: mandatory gross draws through the ordinary-income machinery (the
+            # brackets, not a hand-allocated deduction split, decide the tax).
             divisor = rmd_divisors.get(min(age, 100), 6.4)
-            total_pretax_rmd = sum([current_balances[p] / divisor for p in pretax_accounts if current_balances[p] > 0])
-            
-            if total_pretax_rmd > 0:
-                std_ded_infl = 30000 * cpi_index
-                for pretax in pretax_accounts:
-                    if current_balances[pretax] > 0:
-                        rmd_gross = current_balances[pretax] / divisor
-                        prop = rmd_gross / total_pretax_rmd
-                        allocated_base = std_ded_infl * prop
-                        
-                        base_gross = min(rmd_gross, allocated_base)
-                        excess_gross = max(0, rmd_gross - base_gross)
-                        
-                        net1_usd = execute_draw(pretax, base_gross, pretax_drip_rate, False, draws, taxes)
-                        net2_usd = execute_draw(pretax, excess_gross, pretax_high_rate, False, draws, taxes)
-                        pre_req_eur_generated += (net1_usd + net2_usd) / current_fx
-                    
+            for pretax in PRETAX_ACCOUNTS:
+                if current_balances[pretax] > 0:
+                    rmd_gross = current_balances[pretax] / divisor
+                    net_usd = draw_pretax_gross(pretax, rmd_gross)
+                    pre_req_sc_generated += net_usd * usd_to_sc
+
         elif st.session_state.enable_smoothing and age >= 60:
+            # Lifetime-tax-smoothing early draw. The WHOLE draw now stacks through the
+            # progressive brackets (or the legacy deduction split) -- previously it was
+            # all charged the flat base rate, dramatically understating the cost.
             draw_val = override_early_draw if override_early_draw is not None else st.session_state.target_early_draw
             target_early_gross = draw_val * cpi_index
-            
-            total_pretax = sum(current_balances[p] for p in pretax_accounts if current_balances[p] > 0)
+            total_pretax = sum(current_balances[p] for p in PRETAX_ACCOUNTS if current_balances[p] > 0)
             if total_pretax > 0 and target_early_gross > 0:
                 actual_total_draw = min(target_early_gross, total_pretax)
-                allocations = {p: current_balances[p] / total_pretax for p in pretax_accounts if current_balances[p] > 0}
+                allocations = {p: current_balances[p] / total_pretax for p in PRETAX_ACCOUNTS if current_balances[p] > 0}
                 for pretax, prop in allocations.items():
-                    draw_amt = actual_total_draw * prop
-                    net_usd = execute_draw(pretax, draw_amt, pretax_drip_rate, False, draws, taxes)
-                    pre_req_eur_generated += (net_usd / current_fx)
+                    net_usd = draw_pretax_gross(pretax, actual_total_draw * prop)
+                    pre_req_sc_generated += net_usd * usd_to_sc
 
-        if pre_req_eur_generated >= remaining_eur_need:
-            excess_eur = pre_req_eur_generated - remaining_eur_need
+        if pre_req_sc_generated >= remaining_need_sc:
+            # Surplus net income is redeposited into IBKR -- BUYING EUROS AT SPOT.
+            excess_sc = pre_req_sc_generated - remaining_need_sc
+            excess_eur = excess_sc if is_slovenia else excess_sc / fx_spot
             current_balances["IBKR (Active)"] += excess_eur
             current_basis["IBKR (Active)"] += excess_eur
-            remaining_eur_need = 0 
+            _ibkr_add(excess_eur)
+            remaining_need_sc = 0
         else:
-            remaining_eur_need -= pre_req_eur_generated
-            
-            if age >= 60:
-                for roth in ["Cornerstone: Roth 401(k)", "OCC: Roth 401(k)"]:
-                    remaining_eur_need -= pull_net_need(roth, remaining_eur_need, roth_tax_rate, False, draws, taxes, is_slovenia)
-                    
-            if age >= 60 and (age >= 75 or not st.session_state.enable_smoothing):
-                std_ded_net_equivalent = (30000 * cpi_index) * (1 - pretax_drip_rate)
-                drip_target_eur = min(remaining_eur_need, std_ded_net_equivalent / current_fx)
-                
-                total_pretax = sum(current_balances[p] for p in pretax_accounts if current_balances[p] > 0)
-                if total_pretax > 0 and drip_target_eur > 0:
-                    allocations = {p: current_balances[p] / total_pretax for p in pretax_accounts if current_balances[p] > 0}
+            remaining_need_sc -= pre_req_sc_generated
+
+            # Waterfall order: draining the SI-taxed Roth before tax-free cash is the
+            # "Roth Trap" thesis (every year of Roth growth exits at the trap rate).
+            # It is now a TOGGLE so the joint-success engine can adjudicate it.
+            if age >= 60 and roth_first:
+                for roth in ROTH_ACCOUNTS:
+                    remaining_need_sc -= pull_net_flat(roth, remaining_need_sc, roth_tax_rate, False)
+
+            if age >= 60 and (age >= 75 or not st.session_state.enable_smoothing) and remaining_need_sc > 0:
+                # Bracket-fill drip: draw ordinary income up to the unused US standard
+                # deduction (progressive mode tracks the real remaining room; legacy
+                # mode uses its deduction tracker).
+                if progressive:
+                    std_total = (US_STD_DED_SINGLE if filing_single else US_STD_DED_MFJ) * cpi_index
+                    room_gross = max(0.0, std_total - _tallies['us'])
+                else:
+                    room_gross = _std_left[0]
+                total_pretax = sum(current_balances[p] for p in PRETAX_ACCOUNTS if current_balances[p] > 0)
+                if total_pretax > 0 and room_gross > 0:
+                    need_gross = min(room_gross, _gross_for_net_usd(remaining_need_sc * sc_to_usd), total_pretax)
+                    allocations = {p: current_balances[p] / total_pretax for p in PRETAX_ACCOUNTS if current_balances[p] > 0}
                     for pretax, prop in allocations.items():
-                        achieved_eur = pull_net_need(pretax, drip_target_eur * prop, pretax_drip_rate, False, draws, taxes, is_slovenia)
-                        remaining_eur_need -= achieved_eur
-                    
+                        net_usd = draw_pretax_gross(pretax, need_gross * prop)
+                        remaining_need_sc = max(0.0, remaining_need_sc - net_usd * usd_to_sc)
+
             # Cash and HSA (qualified) draw tax-free. E*TRADE and Crypto are taxed on
-            # the embedded gain: US cap-gains rate before the move, and Slovenia's
-            # holding-period schedule after (reaching 0% once held >15 years).
+            # the embedded gain: US cap-gains rate before the move, Slovenia's
+            # holding-period schedule (with the residual US layer) after.
             for brok in ["Cash (Slush Fund)", "HSA Pool"]:
-                remaining_eur_need -= pull_net_need(brok, remaining_eur_need, 0.0, False, draws, taxes, is_slovenia)
+                remaining_need_sc -= pull_net_flat(brok, remaining_need_sc, 0.0, False)
             for brok in ["E*TRADE (Legacy)", "Crypto (Coinbase)"]:
-                remaining_eur_need -= pull_net_need(brok, remaining_eur_need, legacy_lot_rate, True, draws, taxes, is_slovenia)
-            remaining_eur_need -= pull_net_need("IBKR (Active)", remaining_eur_need, ibkr_rate, True, draws, taxes, is_slovenia)
-            
+                remaining_need_sc -= pull_net_flat(brok, remaining_need_sc, legacy_lot_rate, True)
+            remaining_need_sc -= pull_net_flat("IBKR (Active)", remaining_need_sc, ibkr_rate, True)
+
+            if age >= 60 and not roth_first:
+                for roth in ROTH_ACCOUNTS:
+                    remaining_need_sc -= pull_net_flat(roth, remaining_need_sc, roth_tax_rate, False)
+
             if age >= 60:
-                total_pretax = sum(current_balances[p] for p in pretax_accounts if current_balances[p] > 0)
-                if total_pretax > 0 and remaining_eur_need > 0:
-                    allocations = {p: current_balances[p] / total_pretax for p in pretax_accounts if current_balances[p] > 0}
-                    target_net_snapshot = remaining_eur_need 
+                total_pretax = sum(current_balances[p] for p in PRETAX_ACCOUNTS if current_balances[p] > 0)
+                if total_pretax > 0 and remaining_need_sc > 0:
+                    allocations = {p: current_balances[p] / total_pretax for p in PRETAX_ACCOUNTS if current_balances[p] > 0}
+                    target_net_snapshot = remaining_need_sc
                     for pretax, prop in allocations.items():
-                        achieved_eur = pull_net_need(pretax, target_net_snapshot * prop, pretax_high_rate, False, draws, taxes, is_slovenia)
-                        remaining_eur_need -= achieved_eur
-                
-        total_furs_tax = sum(taxes.values())
-        total_taxes_paid_usd = total_furs_tax + irs_shadow_tax_usd + conversion_tax_usd
-        total_gross_portfolio = sum(draws.values())
-        
-        d_col = draws.copy()
+                        achieved_sc = pull_net_pretax(pretax, target_net_snapshot * prop)
+                        remaining_need_sc -= achieved_sc
+
+        # ---------------------------------------------------------------------
+        # REPORTING (everything in USD-equivalents; EUR flows translated at spot)
+        # ---------------------------------------------------------------------
+        def _usd_eq_map(d):
+            return {a: v * (fx_spot if a in EUR_ASSETS else 1.0) for a, v in d.items()}
+
+        draws_usd = _usd_eq_map(draws)
+        taxes_usd = _usd_eq_map(taxes)
+        total_furs_tax = sum(taxes_usd.values())
+        other_tax_usd = event_tax_usd + div_tax_usd_yr[0]
+        total_taxes_paid_usd = total_furs_tax + irs_shadow_tax_usd + conversion_tax_usd + other_tax_usd
+        total_gross_portfolio = sum(draws_usd.values())
+
+        d_col = draws_usd.copy()
         d_col["Michael's SS"] = ss_m
         d_col["Stephanie's SS"] = ss_s
-        d_col["-------------------"] = 0 
+        d_col["-------------------"] = 0
         d_col["Actual Lifestyle Spend"] = actual_lifestyle_usd
         d_col["Actual Generational Drip"] = actual_gift_usd
         d_col["Total Gross Drawn"] = total_gross_portfolio + gross_ss_usd
         d_col["IRS Tax on SS (US)"] = -irs_shadow_tax_usd
         d_col["Portfolio Tax (FURS)"] = -total_furs_tax
+        d_col["Other Taxes (Div/Events)"] = -other_tax_usd
         d_col["Less: Taxes Paid"] = -total_taxes_paid_usd
         d_col["Net Funded (Lifestyle + Gift)"] = (total_gross_portfolio + gross_ss_usd) - total_taxes_paid_usd
         draw_matrix[yr] = d_col
-        
+
         t_col = {a: (taxes[a] / draws[a] if draws[a] > 0 else 0.0) for a in asset_rows}
-        # SS tax is computed centrally as a household "shadow tax" (irs_shadow_tax_usd) rather
-        # than per-asset, so these rows previously displayed 0% even though SS IS taxed. Show each
-        # person's effective SS tax rate. Survivor-aware: in the survivor phase only the LARGER
-        # benefit is received and taxed, so the tax is attributed to it and the lost one shows 0%.
-        # The Weighted Average already includes this tax in numerator and denominator -> unchanged.
+        # SS tax is computed centrally as a household "shadow tax" rather than per-asset.
+        # Survivor-aware attribution: only the larger benefit is received and taxed.
         if in_survivor_phase:
             if ss_m >= ss_s:
                 t_col["Michael's SS"] = (irs_shadow_tax_usd / ss_m) if ss_m > 0 else 0.0
@@ -1335,12 +1654,13 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
                 t_col["Michael's SS"], t_col["Stephanie's SS"] = 0.0, 0.0
         t_col["Weighted Average"] = total_taxes_paid_usd / (total_gross_portfolio + gross_ss_usd) if (total_gross_portfolio + gross_ss_usd) > 0 else 0
         tax_matrix[yr] = t_col
-        
-        b_col = current_balances.copy()
-        b_col["Total Portfolio Balance"] = sum(current_balances.values())
+
+        b_col = {a: current_balances[a] * (fx_spot if a in EUR_ASSETS else 1.0) for a in asset_rows}
+        b_col["Total Portfolio Balance"] = sum(b_col.values())
         bal_matrix[yr] = b_col
 
     return pd.DataFrame(bal_matrix), pd.DataFrame(draw_matrix), pd.DataFrame(tax_matrix), pd.DataFrame(cont_matrix), pd.Series(wr_matrix)
+
 
 # -----------------------------------------------------------------------------
 # PAGE ROUTING
@@ -1387,10 +1707,10 @@ if selection == "1. Executive Dashboard":
     st.subheader("Plan Success Probability")
     dash_runs = 400
 
-    if st.button("Refresh Success Probability") or 'dash_success_v2' not in st.session_state:
+    if st.button("Refresh Success Probability") or 'dash_success_v3' not in st.session_state:
         with st.spinner(f"Running {dash_runs} full-stress simulations (valuation + crisis + all factors)..."):
-            st.session_state.dash_success_v2 = dashboard_full_stress_metrics(dash_runs, seed=2026)
-    R = st.session_state.dash_success_v2
+            st.session_state.dash_success_v3 = dashboard_full_stress_metrics(dash_runs, seed=2026)
+    R = st.session_state.dash_success_v3
     never_succ = R['never_deplete']; succ_ages = R['ages']; succ_by_age = R['by_age']
     median_funded = R['median_funded']
     band_full, band_mid, band_low = R['band_full'], R['band_mid'], R['band_low']
@@ -1779,7 +2099,41 @@ elif selection == "3. Investment Policy Editor":
     st.markdown("**Cross-Border Capital Gains (E\\*TRADE / Crypto legacy lots)**")
     cg1, cg2 = st.columns(2)
     st.session_state.us_ltcg_rate = cg1.number_input("US Long-Term Cap-Gains Rate (%)", value=st.session_state.us_ltcg_rate, step=1.0, help="Applies to US citizens even abroad (savings clause). Effective post-move rate = max(this, Slovenia's holding-period rate). When Slovenia is 0% (>15y), the full US rate still applies via residual US tax.")
-    st.session_state.retain_us_citizenship = cg2.toggle("Retain US Citizenship", value=st.session_state.retain_us_citizenship, help="If off, models renouncing US citizenship: only Slovenia's graduated rate applies (so >15y holdings become truly 0%).")
+    st.session_state.retain_us_citizenship = cg2.toggle("Retain US Citizenship", value=st.session_state.retain_us_citizenship, help="If off, models renouncing US citizenship: only Slovenia's graduated rate applies (so >15y holdings become truly 0%). Renouncing is NOT free — the engine charges the IRC 877A covered-expatriate EXIT TAX at the move year: a deemed sale of all taxable lots, with gains above the (CPI-indexed) ~$890k exclusion taxed at the US LTCG rate, then a basis step-up.")
+
+    st.markdown("---")
+    st.subheader("Tax Engine")
+    te1, te2 = st.columns(2)
+    st.session_state.use_progressive_tax = te1.toggle(
+        "Progressive bracket engine (US + Slovenia)", value=st.session_state.use_progressive_tax,
+        help="ON (recommended): all ordinary income each year — taxable SS, the smoothing draw, "
+             "RMDs, conversions, Roth-sweep earnings — stacks through the real US brackets "
+             "(MFJ/single, CPI-indexed) and Slovenia's 16/26/33/39/50% schedule once resident; "
+             "the combined liability is max(US, SI), the savings-clause + foreign-tax-credit "
+             "outcome, and a survivor files SINGLE (this IS the widow's penalty). "
+             "OFF: legacy flat base/excess rates below (now with the standard-deduction split "
+             "applied to every ordinary draw, including the smoothing draw).")
+    st.session_state.roth_first = te2.toggle(
+        "Drain Roth before taxable (\"Roth Trap\" order)", value=st.session_state.roth_first,
+        help="ON: the waterfall empties the Slovenia-taxed Roth sleeve before tax-free cash and "
+             "the brokerage lots (every year of Roth growth exits at the trap rate, so exit "
+             "early). OFF: conventional order — Roth is drawn last. Test both against the "
+             "Monte Carlo joint-success rate; the better order depends on the Roth Trap Rate "
+             "vs the aged capital-gains rates.")
+    te3, te4, te5 = st.columns(3)
+    st.session_state.ibkr_lot_aging = te3.toggle(
+        "IBKR lots age into SI schedule", value=st.session_state.ibkr_lot_aging,
+        help="ON: IBKR gains use Slovenia's holding-period schedule (25/20/15/0%) keyed to the "
+             "sleeve's weighted-average acquisition year (sweep + redeposits tracked), with the "
+             "residual US LTCG layer while a citizen. OFF: legacy flat Capital Gains Rate above.")
+    st.session_state.model_div_tax = te4.toggle(
+        "Tax dividends annually", value=st.session_state.model_div_tax,
+        help="Annual drag on taxable sleeves (E*TRADE, IBKR): qualified-dividend rate pre-move; "
+             "Slovenia's flat 25% (max'd with the US rate for citizens) post-move. Net dividends "
+             "reinvest into basis.")
+    st.session_state.div_yield = te5.number_input(
+        "Dividend Yield (%)", value=st.session_state.div_yield, step=0.1,
+        help="Cash yield on the taxable equity sleeves used for the annual dividend tax drag.")
     
     st.markdown("---")
     st.subheader("Phase Contribution Policies")
@@ -1789,20 +2143,22 @@ elif selection == "3. Investment Policy Editor":
     st.markdown("---")
     st.subheader("Retirement Phase Lifestyle Targets (Today's USD Purchasing Power)")
     st.caption(
-        "Enter what you'd spend in **today's US dollars**. After the move, the model converts "
-        "to the euros actually needed in Slovenia by dividing by the exchange rate "
-        f"(~{st.session_state.fx_rate:.2f}). Slovenia's lower cost of living then shows up as "
-        "lifestyle headroom. For reference, a comfortable family-of-four budget in Slovenia is "
+        "Enter what you'd spend in **today's US dollars**. After the move, the model translates "
+        "this consumption basket to euros via the explicit **cost-of-living ratio** "
+        f"(~{st.session_state.sl_col_ratio:.2f} € per $1, set on Page 10) — Slovenia's lower price "
+        "level shows up as lifestyle headroom. The EUR/USD spot rate is a separate input that "
+        "prices currency crossings (so a strong euro now correctly raises the dollar cost of the "
+        "Slovenian life). For reference, a comfortable family-of-four budget in Slovenia is "
         "~€50k/yr, so amounts above that fund travel and discretionary spending."
     )
     r1, r2, r3 = st.columns(3)
     st.session_state.spend_golden = r1.number_input("Golden Years (< 70)", value=st.session_state.spend_golden, step=5000)
     st.session_state.spend_middle = r2.number_input("Middle Phase (70-85)", value=st.session_state.spend_middle, step=5000)
     st.session_state.spend_wind = r3.number_input("Wind Down Years (85-100)", value=st.session_state.spend_wind, step=5000)
-    _fx = st.session_state.fx_rate
+    _col = st.session_state.sl_col_ratio
     st.caption(
-        f"≈ Slovenia euro equivalents:  Golden €{st.session_state.spend_golden/_fx:,.0f}  |  "
-        f"Middle €{st.session_state.spend_middle/_fx:,.0f}  |  Wind-down €{st.session_state.spend_wind/_fx:,.0f}  "
+        f"≈ Slovenia euro equivalents (cost-of-living basis):  Golden €{st.session_state.spend_golden*_col:,.0f}  |  "
+        f"Middle €{st.session_state.spend_middle*_col:,.0f}  |  Wind-down €{st.session_state.spend_wind*_col:,.0f}  "
         f"(of which ~€50k is a comfortable base, the rest travel/discretionary)."
     )
 
@@ -1867,35 +2223,92 @@ elif selection == "4. Real Estate & Relocation":
 # -----------------------------------------------------------------------------
 elif selection == "5. The Great Reset Simulator":
     st.header("5. The Great Reset Simulator")
+    st.markdown(
+        "Sweeps the Roth 401(k) balances into the EUR-denominated IBKR sleeve around "
+        "retirement, converting the dollars to euros **at the spot rate**. The engine now "
+        "applies the real tax treatment instead of assuming a free sweep:"
+    )
     st.session_state.execute_great_reset = st.toggle("Enable Great Reset in Cash Flow Model", value=st.session_state.execute_great_reset)
-    st.caption("Note: The pre-move Roth 401(k) sweep generates **no US tax** because qualified Roth distributions are US-tax-exempt — not because of any capital-gains rate. Any pre-move sales of taxable lots (E\\*TRADE/Crypto) in the drawdown engine are taxed at the US long-term cap-gains rate on the gain, never 0%.")
+    _GR_NOW = "Sweep at retirement (earnings taxed + 10% penalty if under 59½)"
+    _GR_DEFER = "Defer sweep to age 59½ (post-move sweep taxed at the Roth Trap Rate)"
+    st.session_state.great_reset_mode = st.radio(
+        "Sweep timing", [_GR_NOW, _GR_DEFER],
+        index=0 if str(st.session_state.great_reset_mode).startswith("Sweep") else 1,
+        disabled=not st.session_state.execute_great_reset,
+        help="A Roth 401(k) distribution is only QUALIFIED at 59½ (plus the 5-year clock). "
+             "Sweeping at retirement age 55 is non-qualified: the EARNINGS slice is US "
+             "ordinary income plus a 10% early-withdrawal penalty (the contributions slice "
+             "exits tax-free). Deferring to 59½ avoids the US tax and penalty, but by then "
+             "you are a Slovenian resident — under the model's own Roth-Trap assumption "
+             "Slovenia taxes the distribution. There is no free path; this lets the "
+             "Monte Carlo adjudicate the trade-off honestly."
+    )
+    st.caption(
+        "What the engine actually does (Page 5 previously displayed a gain-harvest and basis "
+        "step-up for Crypto/E\\*TRADE/IBKR that was never simulated): **only the Roth sleeves are "
+        "swept**. Taxable lots keep their original basis and are taxed on the embedded gain when "
+        "actually sold in the drawdown waterfall — US LTCG pre-move, Slovenia's holding-period "
+        "schedule (with the residual US layer) after."
+    )
     reset_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
-    
+    reset_age = st.session_state.ret_age
+
     if st.session_state.execute_great_reset:
-        reset_assets = ["Crypto (Coinbase)", "IBKR (Active)", "Cornerstone: Roth 401(k)", "OCC: Roth 401(k)"]
-        market_ret = st.session_state.usd_market_return / 100.0 
+        # Project ONLY the Roth sleeves to the sweep year and show the honest tax estimate.
+        defer = str(st.session_state.great_reset_mode).startswith("Defer")
+        sweep_age = max(60, reset_age) if defer else reset_age
+        sweep_yr = 2026 + (sweep_age - st.session_state.current_age)
+        move_age = st.session_state.move_age
+        market_ret = st.session_state.usd_market_return / 100.0
         policy = st.session_state.policy_df.set_index("Asset Category")
-        projected_data = []
-        for asset in reset_assets:
+        rows = []
+        tot_val = tot_basis = 0.0
+        for asset in ["Cornerstone: Roth 401(k)", "OCC: Roth 401(k)"]:
             bal = st.session_state.asset_balances.get(asset, 0)
-            basis = bal 
+            basis = bal
             if asset in policy.index:
                 esc = policy.loc[asset, "Annual Savings Escalator (%)"] / 100.0
                 curr_cont = policy.loc[asset, "Current State"]
                 nb_cont = policy.loc[asset, "Northbrook Grind"]
             else:
                 esc, curr_cont, nb_cont = 0, 0, 0
-            for y in range(2026, reset_yr):
+            for y in range(2026, min(sweep_yr, reset_yr)):
                 cont = curr_cont if y < st.session_state.nb_start_yr else nb_cont
                 bal = bal * (1 + market_ret) + cont
                 basis += cont
                 curr_cont *= (1 + esc)
                 nb_cont *= (1 + esc)
-            projected_data.append([asset, basis, bal])
-        df_reset = pd.DataFrame(projected_data, columns=["Asset Bucket", "Projected Cost Basis", "Projected Market Value at Reset"])
-        df_reset['Realized US Gain'] = np.where(df_reset['Asset Bucket'].str.contains("Roth"), 0, df_reset['Projected Market Value at Reset'] - df_reset['Projected Cost Basis'])
-        df_reset['New Stepped-Up Basis / Protected Cash'] = df_reset['Projected Market Value at Reset']
-        st.dataframe(df_reset.style.format({"Projected Cost Basis": "${:,.0f}", "Projected Market Value at Reset": "${:,.0f}", "Realized US Gain": "${:,.0f}", "New Stepped-Up Basis / Protected Cash": "${:,.0f}"}), use_container_width=True)
+            for y in range(min(sweep_yr, reset_yr), sweep_yr):
+                bal = bal * (1 + market_ret)  # post-retirement growth, no contributions
+            rows.append([asset, basis, bal, max(0.0, bal - basis)])
+            tot_val += bal
+            tot_basis += basis
+        df_reset = pd.DataFrame(rows, columns=["Roth Sleeve", "Projected Contributions (Basis)", "Projected Value at Sweep", "Projected Earnings"])
+        st.dataframe(df_reset.style.format({"Projected Contributions (Basis)": "${:,.0f}", "Projected Value at Sweep": "${:,.0f}", "Projected Earnings": "${:,.0f}"}), use_container_width=True)
+
+        earnings = max(0.0, tot_val - tot_basis)
+        if not defer and sweep_age < 60:
+            est_penalty = 0.10 * earnings
+            st.warning(
+                f"Sweeping at age {sweep_age} is **non-qualified**: roughly ${earnings:,.0f} of "
+                f"earnings is US ordinary income (taxed through the brackets, stacked on other "
+                f"income that year) **plus a ~${est_penalty:,.0f} early-withdrawal penalty**. "
+                "The exact tax is computed inside the engine via the progressive brackets."
+            )
+        elif defer:
+            si_rate = st.session_state.tax_roth / 100.0
+            note_si = (f"the move (age {move_age}), so Slovenia taxes the distribution at the "
+                       f"Roth Trap Rate (~${tot_val * si_rate:,.0f} at {st.session_state.tax_roth:.0f}%)"
+                       if sweep_age >= move_age else "the move, so no Slovenian tax applies")
+            st.info(
+                f"Sweep deferred to age {sweep_age}: qualified for US purposes (no US tax or "
+                f"penalty), but it occurs after {note_si}."
+            )
+        st.caption(
+            f"The swept dollars buy euros at the spot rate in {sweep_yr} (no more 1:1 par "
+            "conversion), land in IBKR with stepped-up basis, and begin aging on Slovenia's "
+            "holding-period schedule from the sweep year."
+        )
 
 # -----------------------------------------------------------------------------
 # 6. SOCIAL SECURITY & PENSIONS
@@ -1958,6 +2371,23 @@ elif selection == "6. Social Security & Pensions":
             f"haircut \u2014 a deliberately pessimistic SS scenario, most punishing for the survivor."
         )
 
+    # Quantify the stacked pessimism so the assumption pile is a CHOICE, not an accident.
+    _hc = st.session_state.trust_fund_haircut / 100.0
+    _mc_p = st.session_state.get('mc_ss_haircut_prob', 0.0)
+    _mc_s = st.session_state.get('mc_ss_haircut_size', 0.0)
+    _exp_share = (1 - _hc) * (1 - _mc_p * _mc_s)
+    st.caption(
+        f"**Assumption-stacking check:** the {st.session_state.trust_fund_haircut}% baseline haircut, "
+        f"the Monte Carlo's {_mc_p:.0%} chance of a further {_mc_s:.0%} cut, the COLA lag, and the "
+        f"{st.session_state.mike_future_pct}%/{st.session_state.steph_future_pct}% future-earnings "
+        f"assumptions COMPOUND: expected benefit \u2248 **{_exp_share:.0%} of scheduled** before COLA-lag "
+        "erosion. Each is defensible; together they are a deliberately severe SS scenario \u2014 re-run "
+        "the dashboard at 0% haircut once to see how much of the failure tail is this stack rather "
+        "than market risk. COLAs are now indexed to each path's REALIZED inflation (less the "
+        "structural lag), so high-inflation paths and the 1966/1973 backtest cohorts no longer "
+        "erode SS's real value unrealistically."
+    )
+
     st.markdown("---")
     st.subheader("Optimized Claim Ages")
     oc1, oc2, oc3 = st.columns([1, 1, 1])
@@ -2005,7 +2435,9 @@ elif selection == "6. Social Security & Pensions":
     # Recompute timelines with current inputs and ages.
     MIKE_SS, STEPH_SS = get_ss_timelines()
     m_claim_yr = 2026 + (st.session_state.mike_ss_age - st.session_state.current_age)
-    s_claim_yr = 2026 + (st.session_state.steph_ss_age - st.session_state.current_age)
+    # Stephanie's claim year keys off HER OWN age (she is mc_wife_age_offset years younger),
+    # matching the rebuilt SS module (Tier-2 fix #7).
+    s_claim_yr = 2026 + (st.session_state.steph_ss_age - (st.session_state.current_age - st.session_state.mc_wife_age_offset))
     inf_rate = st.session_state.inflation_rate / 100.0
     m_real_ss = MIKE_SS[m_claim_yr] / ((1 + inf_rate) ** (m_claim_yr - 2026))
     s_real_ss = STEPH_SS[s_claim_yr] / ((1 + inf_rate) ** (s_claim_yr - 2026))
@@ -2092,10 +2524,10 @@ elif selection == "7. Cash Flow & Slovenian Drip":
         if show_tax_band:
             tb1, tb2 = st.columns(2)
             tax_runs = tb1.number_input("Simulations", value=300, min_value=100, max_value=1500, step=100, key="p7_runs")
-            if tb2.button("Run / Refresh Tax Range") or 'p7_bands' not in st.session_state:
+            if tb2.button("Run / Refresh Tax Range") or 'p7_bands_v2' not in st.session_state:
                 with st.spinner(f"Running {int(tax_runs)} full-stress paths..."):
-                    st.session_state.p7_bands = mc_bands_for_pages(int(tax_runs), seed=int(st.session_state.get('mc_seed', 42)))
-            T = st.session_state.p7_bands
+                    st.session_state.p7_bands_v2 = mc_bands_for_pages(int(tax_runs), seed=int(st.session_state.get('mc_seed', 42)))
+            T = st.session_state.p7_bands_v2
             yrs = T['years']
             # Clip to the retirement window shown on the deterministic chart.
             keep = [i for i, y in enumerate(yrs) if y >= start_yr]
@@ -2172,10 +2604,10 @@ elif selection == "8. Yearly Balances (2026-2089)":
     if view_mode.startswith("Monte Carlo"):
         mc1, mc2 = st.columns(2)
         band_runs = mc1.number_input("Simulations", value=400, min_value=100, max_value=2000, step=100, key="p8_runs")
-        if mc2.button("Run / Refresh Percentile Fan") or 'p8_bands' not in st.session_state:
+        if mc2.button("Run / Refresh Percentile Fan") or 'p8_bands_v2' not in st.session_state:
             with st.spinner(f"Running {int(band_runs)} full-stress paths..."):
-                st.session_state.p8_bands = mc_bands_for_pages(int(band_runs), seed=int(st.session_state.get('mc_seed', 42)))
-        B = st.session_state.p8_bands
+                st.session_state.p8_bands_v2 = mc_bands_for_pages(int(band_runs), seed=int(st.session_state.get('mc_seed', 42)))
+        B = st.session_state.p8_bands_v2
         yrs = B['years']
         fig8 = go.Figure()
         fig8.add_trace(go.Scatter(x=yrs, y=B['bal_p90'], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
@@ -2333,11 +2765,24 @@ elif selection == "10. Institutional Stress Testing":
     st.session_state.sorr_return = st.number_input("Annual Return During Crash (%)", value=st.session_state.sorr_return, step=1.0)
     
     st.markdown("---")
-    st.subheader("C. Foreign Exchange Risk (USD/EUR)")
-    st.markdown("If your lifestyle targets are effectively priced in Euros, a weakening US Dollar forces your portfolio to bleed faster to afford the same lifestyle. *Note: IBKR and Cash ledgers are exempt from this drag as they represent Synthetic Euro Hedges.*")
-    f1, f2 = st.columns(2)
-    st.session_state.fx_enable = f1.toggle("Enable Currency Drag", value=st.session_state.fx_enable)
-    st.session_state.fx_rate = f2.number_input("Assumed EUR/USD Exchange Rate (e.g. 1.15 = $1.15 USD per €1.00)", value=st.session_state.fx_rate, step=0.05)
+    st.subheader("C. Foreign Exchange & Cost of Living (USD/EUR)")
+    st.markdown(
+        "Retirement spending is denominated in **euros** (your actual liability in Slovenia). "
+        "Lifestyle inputs stay in today's US dollars and are translated to euros ONCE via the "
+        "explicit **cost-of-living ratio** below — the Slovenian price-level discount, now "
+        "separated from the exchange rate it used to be conflated with. The **spot rate** then "
+        "prices every currency crossing: USD accounts pay the spot rate for each euro of "
+        "spending, so a **stronger euro (higher rate) drains the USD-heavy portfolio faster** — "
+        "the correct direction of risk. EUR-denominated IBKR and Cash fund euro spending 1:1 "
+        "and are genuine hedges; all totals report EUR sleeves at the year's spot rate."
+    )
+    f1, f2, f3 = st.columns(3)
+    st.session_state.fx_enable = f1.toggle("Model FX (off = parity 1.00)", value=st.session_state.fx_enable,
+                                           help="When off, the spot rate is pinned at 1.00 — currency risk and conversion costs are ignored entirely.")
+    st.session_state.fx_rate = f2.number_input("EUR/USD Spot Rate ($ per €1.00)", value=st.session_state.fx_rate, step=0.05,
+                                               help="Deterministic spot rate (the Monte Carlo's stochastic FX wanders around this). Raise it to stress a strong euro — which now correctly HURTS the plan.")
+    st.session_state.sl_col_ratio = f3.number_input("Slovenia Cost-of-Living Ratio (€ per $1 of lifestyle)", value=st.session_state.sl_col_ratio, step=0.01,
+                                                    help="Euros needed in Slovenia to buy $1 of US-equivalent lifestyle (the PPP discount). 0.77 ≈ a ~23% lower price level. Applies to the consumption basket only — SS and gifts are USD cash flows converted at spot.")
 
     if st.button("Run Stress Test Diagnostics"):
         with st.spinner("Stress testing portfolio parameters..."):
@@ -2399,9 +2844,10 @@ elif selection == "12. Monte Carlo Simulation":
         ["Historical Block Bootstrap", "Correlated Normal (Parametric)"],
         index=0 if st.session_state.mc_method == "Historical Block Bootstrap" else 1,
         horizontal=True,
-        help="Block Bootstrap resamples contiguous runs of real S&P 500 history (1928-2025), "
-             "preserving fat tails, volatility clustering, and momentum. Normal draws are "
-             "smoother and understate crash risk."
+        help="Block Bootstrap resamples contiguous runs of PAIRED US/EUR calendar years "
+             "(2000-2025, the overlap of the two return series), preserving fat tails, "
+             "volatility clustering, and cross-sleeve crisis synchronization. Normal draws "
+             "are smoother and understate crash risk."
     )
 
     st.session_state.mc_mean_type = st.radio(
@@ -2516,62 +2962,19 @@ elif selection == "12. Monte Carlo Simulation":
         use_bootstrap = (st.session_state.mc_method == "Historical Block Bootstrap")
         compound_target = (st.session_state.mc_mean_type == "Compound (CAGR) target")
 
-        # EUR bond-return generator, correlated with the equity path. Correlation is the
-        # normal-year value most of the time but jumps to the crisis value in years where
-        # equities fall hard (the 2022 lesson: bonds and stocks drop together on rate/
-        # inflation shocks), so de-risking is not a free hedge in exactly the bad years.
-        b_mean = st.session_state.bond_mean / 100.0
-        b_vol = st.session_state.bond_vol / 100.0
-        b_corr_n = st.session_state.bond_eq_corr
-        b_corr_c = st.session_state.bond_eq_corr_crisis
-        def _draw_bonds(usd_path):
-            usd_path = np.asarray(usd_path)
-            eq_mu = usd_path.mean(); eq_sd = usd_path.std() or 1e-9
-            zb = rng.standard_normal(len(usd_path))
-            out = np.empty(len(usd_path))
-            for i, r in enumerate(usd_path):
-                z_eq = (r - eq_mu) / eq_sd
-                # crisis year if equity is a sharp drop (> ~1 sd below mean AND negative)
-                corr = b_corr_c if (z_eq < -1.0 and r < 0) else b_corr_n
-                out[i] = b_mean + b_vol * (corr * z_eq + np.sqrt(max(0.0, 1 - corr**2)) * zb[i])
-            return out
-
-        # Valuation conditioning and crisis overlay now use shared module-level helpers
-        # (build_valuation_shift / apply_crisis_overlay) so the tornado, interaction matrix,
-        # and Roth optimizer evaluate against the identical conditioned world.
+        # Valuation conditioning is applied inside the shared helpers for the bootstrap;
+        # the parametric branch applies it explicitly below so both methods evaluate
+        # against the identical conditioned world.
         val_shift_usd, val_shift_eur = build_valuation_shift(n_years, usd_mean, eur_mean)
-        def _apply_crisis(usd, eur, bond):
-            return apply_crisis_overlay(usd, eur, bond, rng)
 
         if use_bootstrap:
-            block_len = int(st.session_state.mc_block_len)
-            # Pair the same calendar years across the US and EUR series so both sleeves
-            # share global crises, using independent European return data for the EUR
-            # sleeve. Sampling is restricted to years present in BOTH series.
-            common_years = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
-            usd_hist = np.array([SP500_BY_YEAR[y] for y in common_years]) / 100.0
-            eur_hist = np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in common_years]) / 100.0
-            n_blocks_src = len(common_years) - block_len + 1
-            # Recenter each sleeve to its own historical mean, then to the user's target;
-            # add volatility drag back when targeting a compound (CAGR) return.
-            usd_var, eur_var = float(np.var(usd_hist)), float(np.var(eur_hist))
-            usd_arith = usd_mean + (usd_var / 2.0 if compound_target else 0.0)
-            eur_arith = eur_mean + (eur_var / 2.0 if compound_target else 0.0)
-
+            # Shared paired block-bootstrap (sec: SHARED MONTE CARLO MACHINERY). Recentered
+            # by the FULL-HISTORY mean -- per-draw recentering used to pin every path's
+            # 64-year average exactly to the target, deleting long-run-mean uncertainty
+            # and overstating success. Honors mc_block_len / mc_mean_type, and applies
+            # valuation conditioning + the crisis overlay internally.
             def make_paths():
-                # Sample contiguous calendar-year blocks; apply the SAME year indices to
-                # both sleeves so a 2008 in the US sleeve is a 2008 in the EUR sleeve.
-                idx = []
-                while len(idx) < n_years:
-                    s = rng.integers(0, n_blocks_src)
-                    idx.extend(range(s, s + block_len))
-                idx = np.array(idx[:n_years])
-                u_seq, e_seq = usd_hist[idx], eur_hist[idx]
-                usd = u_seq - u_seq.mean() + usd_arith + val_shift_usd
-                eur = e_seq - e_seq.mean() + eur_arith + val_shift_eur
-                bond = _draw_bonds(usd)
-                usd, eur, bond = _apply_crisis(usd, eur, bond)
-                return usd, eur, bond
+                return make_bootstrap_paths(rng, n_years)
         else:
             usd_sd = st.session_state.mc_usd_vol / 100.0
             eur_sd = st.session_state.mc_eur_vol / 100.0
@@ -2588,9 +2991,8 @@ elif selection == "12. Monte Carlo Simulation":
             def make_paths():
                 z = rng.standard_normal((n_years, 2)) @ L.T
                 usd = usd_arith + z[:, 0] + val_shift_usd; eur = eur_arith + z[:, 1] + val_shift_eur
-                bond = _draw_bonds(usd)
-                usd, eur, bond = _apply_crisis(usd, eur, bond)
-                return usd, eur, bond
+                bond = draw_bond_path(usd, rng)
+                return apply_crisis_overlay(usd, eur, bond, rng)
 
         terminal_real, depletion_ages = [], []
         real_paths = np.full((n_runs, n_years), np.nan)
@@ -2599,65 +3001,10 @@ elif selection == "12. Monte Carlo Simulation":
         ret_start_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
 
         # ---- Stress-factor scenario builder (per path) ----
-        base_infl = st.session_state.inflation_rate / 100.0
-        infl_vol = st.session_state.mc_infl_vol / 100.0
-        infl_corr = st.session_state.mc_infl_equity_corr
-        fx_vol = st.session_state.mc_fx_vol / 100.0
-        fx_base = st.session_state.fx_rate
-        wife_offset = st.session_state.mc_wife_age_offset
-
+        # Shared with the dashboard, tornado, interaction matrix, and optimizers
+        # (sec: SHARED MONTE CARLO MACHINERY) so factor semantics cannot diverge.
         def build_scenario(usd_draws, eur_draws):
-            sc = {}
-            # Inflation: correlated with equity (negative corr = stagflation risk). Use the
-            # USD equity z-score for the year to tilt inflation.
-            if st.session_state.mc_stoch_inflation:
-                infl = {}
-                eq_mean = np.mean(usd_draws); eq_sd = np.std(usd_draws) or 1e-9
-                for i, y in enumerate(years):
-                    eq_z = (usd_draws[i] - eq_mean) / eq_sd
-                    shock = rng.normal(0, infl_vol)
-                    yr_infl = base_infl + infl_corr * eq_z * infl_vol + np.sqrt(max(0, 1 - infl_corr**2)) * shock
-                    infl[y] = max(-0.02, yr_infl)  # floor at -2% (deflation bound)
-                sc['inflation'] = infl
-            # FX: geometric random walk around the base multiplier. Zero log-drift keeps the
-            # TYPICAL (median) path flat at today's rate with symmetric two-sided risk, so
-            # FX volatility neither helps nor hurts on average (a -0.5 sigma^2 drift would
-            # have made most paths end with cheaper euros, biasing FX to look beneficial).
-            if st.session_state.mc_stoch_fx:
-                fx = {}; log_lvl = 0.0
-                kappa = st.session_state.get('mc_fx_reversion', 0.15)
-                for y in years:
-                    log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fx_vol)
-                    fx[y] = fx_base * np.exp(log_lvl)
-                sc['fx'] = fx
-            # Longevity: draw both death ages; spending stops after the later death.
-            if st.session_state.mc_stoch_longevity:
-                d_self = sample_death_age(start_age, SURV_MALE, rng)
-                d_spouse = sample_death_age(start_age - wife_offset, SURV_FEMALE, rng)
-                # spouse's death YEAR uses their own age timeline (offset)
-                self_death_yr = 2026 + (d_self - start_age)
-                spouse_death_yr = 2026 + (d_spouse - (start_age - wife_offset))
-                sc['death_year'] = min(2089, max(self_death_yr, spouse_death_yr))
-                sc['_first_death_yr'] = min(self_death_yr, spouse_death_yr)
-            # LTC: independent lifetime chance per person; cost over N years late in life.
-            if st.session_state.mc_ltc_enable:
-                ltc = {}
-                for _ in range(2):  # two people
-                    if rng.random() < st.session_state.mc_ltc_prob:
-                        onset_age = rng.integers(78, 90)
-                        onset_yr = 2026 + (onset_age - start_age)
-                        for k in range(int(st.session_state.mc_ltc_years)):
-                            yy = onset_yr + k
-                            if yy <= 2089:
-                                ltc[yy] = ltc.get(yy, 0) + st.session_state.mc_ltc_cost
-                if ltc: sc['ltc_cost'] = ltc
-            # Tax-regime drift: one multiplier per path.
-            if st.session_state.mc_tax_regime:
-                sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
-            # SS haircut: a path either gets the cut or not.
-            if rng.random() < st.session_state.mc_ss_haircut_prob:
-                sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
-            return sc
+            return build_stress_scenario(rng, usd_draws, flags=None, years=years)
 
         any_stress = (st.session_state.mc_stoch_inflation or st.session_state.mc_stoch_fx or
                       st.session_state.mc_stoch_longevity or st.session_state.mc_ltc_enable or
@@ -2745,12 +3092,22 @@ elif selection == "12. Monte Carlo Simulation":
             # wrongly count as lifestyle "cuts".
             death_yr = scen.get('death_year', 9999)
             scored_years = [y for y in ret_years if y <= death_yr]
-            scored_target = sum(target_real_map[y] for y in scored_years) or 1.0
+            # Survivor-adjust the target (Tier-2 fix #8): after the first death the engine
+            # intentionally spends at survivor_expense_ratio of the couple's target, so the
+            # target must scale down too -- otherwise the planned reduction would wrongly
+            # count as a lifestyle shortfall (the old divergence vs the dashboard).
+            _fd_yr = scen.get('_first_death_yr')
+            _surv_on = st.session_state.survivor_enable and (_fd_yr is not None)
+            _s_ratio = st.session_state.survivor_expense_ratio if _surv_on else 1.0
+            def _adj_tgt(y):
+                t = target_real_map[y]
+                return t * _s_ratio if (_surv_on and y > _fd_yr) else t
+            scored_target = sum(_adj_tgt(y) for y in scored_years) or 1.0
             for y in scored_years:
                 disc = disc_map[y]
                 achieved_real = life_nom.get(y, 0.0) / disc
                 achieved_real_total += achieved_real
-                tgt = target_real_map[y]
+                tgt = _adj_tgt(y)
                 if tgt > 0 and achieved_real < 0.99 * tgt:  # 1% tolerance = a real cut
                     cut_count += 1
                     if np.isnan(first_cut):
@@ -3071,67 +3428,17 @@ elif selection == "12. Monte Carlo Simulation":
         t_tmap = {y: t_tgt(t_start + (y - 2026)) for y in t_ret_years}
         t_total_tgt = sum(t_tmap.values()) or 1.0
 
-        # Return generator: reuse block bootstrap (paired) for consistency.
-        t_common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
-        t_uh = np.array([SP500_BY_YEAR[y] for y in t_common]) / 100.0
-        t_eh = np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in t_common]) / 100.0
-        t_block = int(st.session_state.mc_block_len); t_nb = len(t_common) - t_block + 1
-        t_um = st.session_state.usd_market_return/100.0 + np.var(t_uh)/2
-        t_em = st.session_state.eur_market_return/100.0 + np.var(t_eh)/2
-
-        tb_mean = st.session_state.bond_mean/100.0; tb_vol = st.session_state.bond_vol/100.0
-        tb_cn = st.session_state.bond_eq_corr; tb_cc = st.session_state.bond_eq_corr_crisis
-        t_vsu, t_vse = build_valuation_shift(t_n, st.session_state.usd_market_return/100.0, st.session_state.eur_market_return/100.0)
+        # Return generation, stress factors, and scoring all come from the SHARED
+        # MONTE CARLO MACHINERY, so the tornado evaluates against exactly the same
+        # conditioned world (full-history recentering, valuation shift, crisis
+        # overlay) and the same survivor-aware joint-success definition as the
+        # main simulation and the dashboard. The 'longevity' factor now carries
+        # the first-death year, so the survivor scenario engages here too.
         def t_make(rng):
-            idx = []
-            while len(idx) < t_n:
-                s = rng.integers(0, t_nb); idx.extend(range(s, s + t_block))
-            idx = np.array(idx[:t_n])
-            u = t_uh[idx] - t_uh[idx].mean() + t_um + t_vsu
-            e = t_eh[idx] - t_eh[idx].mean() + t_em + t_vse
-            mu = u.mean(); sd = u.std() or 1e-9; zb = rng.standard_normal(t_n); b = np.empty(t_n)
-            for i, r in enumerate(u):
-                z = (r-mu)/sd; c = tb_cc if (z < -1.0 and r < 0) else tb_cn
-                b[i] = tb_mean + tb_vol*(c*z + np.sqrt(max(0.0,1-c**2))*zb[i])
-            u, e, b = apply_crisis_overlay(u, e, b, rng)
-            return u, e, b
+            return make_bootstrap_paths(rng, t_n)
 
         def t_scenario(flags, usd, eur, rng):
-            # flags: a set/list of factor keys to apply together (enables pair interactions).
-            flags = set(flags) if flags else set()
-            sc = {}
-            if 'inflation' in flags:
-                infl = {}; em = np.mean(usd); es = np.std(usd) or 1e-9
-                ic = st.session_state.mc_infl_equity_corr; iv = st.session_state.mc_infl_vol/100.0
-                for i, y in enumerate(t_years):
-                    z = (usd[i]-em)/es
-                    infl[y] = max(-0.02, t_inf + ic*z*iv + np.sqrt(max(0,1-ic**2))*rng.normal(0,iv))
-                sc['inflation'] = infl
-            if 'fx' in flags:
-                fxv = st.session_state.mc_fx_vol/100.0; fxb = st.session_state.fx_rate; fx = {}
-                kappa = st.session_state.get('mc_fx_reversion', 0.15); log_lvl = 0.0
-                for y in t_years:
-                    log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fxv); fx[y] = fxb * np.exp(log_lvl)
-                sc['fx'] = fx
-            if 'longevity' in flags:
-                ds = sample_death_age(t_start, SURV_MALE, rng)
-                dp = sample_death_age(t_start - st.session_state.mc_wife_age_offset, SURV_FEMALE, rng)
-                sy = 2026 + (ds - t_start); py = 2026 + (dp - (t_start - st.session_state.mc_wife_age_offset))
-                sc['death_year'] = min(2089, max(sy, py))
-            if 'ltc' in flags:
-                ltc = {}
-                for _ in range(2):
-                    if rng.random() < st.session_state.mc_ltc_prob:
-                        oy = 2026 + (int(rng.integers(78,90)) - t_start)
-                        for k in range(int(st.session_state.mc_ltc_years)):
-                            if oy+k <= 2089: ltc[oy+k] = ltc.get(oy+k,0)+st.session_state.mc_ltc_cost
-                if ltc: sc['ltc_cost'] = ltc
-            if 'tax' in flags:
-                sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
-            if 'ss' in flags:
-                if rng.random() < st.session_state.mc_ss_haircut_prob:
-                    sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
-            return sc
+            return build_stress_scenario(rng, usd, flags=set(flags) if flags else set(), years=t_years)
 
         def t_run(flags, n, seed=12345):
             # Common random numbers: equity paths AND factor draws use fixed seeds across all
@@ -3146,24 +3453,8 @@ elif selection == "12. Monte Carlo Simulation":
                 sc['returns'] = {t_years[i]: (float(usd[i]), float(eur[i])) for i in range(t_n)}
                 sc['bond'] = {t_years[i]: float(bond[i]) for i in range(t_n)}
                 db, dd, _, _, _ = run_core_simulation(scenario=sc)
-                tot = db.loc['Total Portfolio Balance']
-                horizon = sc.get('death_year', 2089)
-                depl = tot[tot <= 0]
-                nd = (len(depl) == 0) or (depl.index.min() > horizon)
-                if 'inflation' in sc:
-                    dm = {}; cpi = 1.0
-                    for y in t_years:
-                        if y > 2026: cpi *= (1+sc['inflation'][y])
-                        dm[y] = cpi
-                else:
-                    dm = {y:(1+t_inf)**(y-2026) for y in t_years}
-                life = dd.loc["Actual Lifestyle Spend"]; gift = dd.loc["Actual Generational Drip"]
-                dy = sc.get('death_year', 9999); sy = [y for y in t_ret_years if y <= dy]
-                stgt = sum(t_tmap[y] for y in sy) or 1.0
-                ar = sum(life.get(y,0)/dm[y] for y in sy)
-                full = (ar/stgt) >= 0.95
-                gtot = sum(gift.get(y,0)/dm[y] for y in t_ret_years)
-                if nd and full and gtot >= t_gift_goal: joint_ok += 1
+                if score_path_joint(db, dd, sc, t_ret_years, t_tmap, t_gift_goal)['joint']:
+                    joint_ok += 1
             return 100.0 * joint_ok / n
 
         tn = int(st.session_state.tornado_runs)
@@ -3241,57 +3532,13 @@ elif selection == "12. Monte Carlo Simulation":
             return st.session_state.spend_golden if a < 70 else (st.session_state.spend_middle if a < 85 else st.session_state.spend_wind)
         im_tmap = {y: im_tgt(im_start + (y - 2026)) for y in im_ret_years}
 
-        im_common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
-        im_uh = np.array([SP500_BY_YEAR[y] for y in im_common]) / 100.0
-        im_eh = np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in im_common]) / 100.0
-        im_block = int(st.session_state.mc_block_len); im_nb = len(im_common) - im_block + 1
-        im_um = st.session_state.usd_market_return/100.0 + np.var(im_uh)/2
-        im_em = st.session_state.eur_market_return/100.0 + np.var(im_eh)/2
-
-        ib_mean = st.session_state.bond_mean/100.0; ib_vol = st.session_state.bond_vol/100.0
-        ib_cn = st.session_state.bond_eq_corr; ib_cc = st.session_state.bond_eq_corr_crisis
-        im_vsu, im_vse = build_valuation_shift(im_n, st.session_state.usd_market_return/100.0, st.session_state.eur_market_return/100.0)
+        # Shared machinery: identical conditioned world and survivor-aware joint
+        # scoring as the main MC, dashboard, and tornado.
         def im_make(rng):
-            idx = []
-            while len(idx) < im_n:
-                s = rng.integers(0, im_nb); idx.extend(range(s, s + im_block))
-            idx = np.array(idx[:im_n])
-            u = im_uh[idx]-im_uh[idx].mean()+im_um+im_vsu; e = im_eh[idx]-im_eh[idx].mean()+im_em+im_vse
-            mu = u.mean(); sd = u.std() or 1e-9; zb = rng.standard_normal(im_n); b = np.empty(im_n)
-            for i, r in enumerate(u):
-                z = (r-mu)/sd; c = ib_cc if (z < -1.0 and r < 0) else ib_cn
-                b[i] = ib_mean + ib_vol*(c*z + np.sqrt(max(0.0,1-c**2))*zb[i])
-            u, e, b = apply_crisis_overlay(u, e, b, rng)
-            return u, e, b
+            return make_bootstrap_paths(rng, im_n)
 
         def im_scenario(flags, usd, rng):
-            flags = set(flags); sc = {}
-            if 'inflation' in flags:
-                infl = {}; em = np.mean(usd); es = np.std(usd) or 1e-9
-                ic = st.session_state.mc_infl_equity_corr; iv = st.session_state.mc_infl_vol/100.0
-                for i, y in enumerate(im_years):
-                    infl[y] = max(-0.02, im_inf + ic*((usd[i]-em)/es)*iv + np.sqrt(max(0,1-ic**2))*rng.normal(0,iv))
-                sc['inflation'] = infl
-            if 'fx' in flags:
-                fxv = st.session_state.mc_fx_vol/100.0; fxb = st.session_state.fx_rate; fx = {}
-                kappa = st.session_state.get('mc_fx_reversion', 0.15); log_lvl = 0.0
-                for y in im_years:
-                    log_lvl = (1 - kappa) * log_lvl + rng.normal(0, fxv); fx[y] = fxb * np.exp(log_lvl)
-                sc['fx'] = fx
-            if 'ltc' in flags:
-                ltc = {}
-                for _ in range(2):
-                    if rng.random() < st.session_state.mc_ltc_prob:
-                        oy = 2026 + (int(rng.integers(78,90)) - im_start)
-                        for k in range(int(st.session_state.mc_ltc_years)):
-                            if oy+k <= 2089: ltc[oy+k] = ltc.get(oy+k,0)+st.session_state.mc_ltc_cost
-                if ltc: sc['ltc_cost'] = ltc
-            if 'tax' in flags:
-                sc['tax_mult'] = max(0.2, rng.normal(1.0, st.session_state.mc_tax_vol))
-            if 'ss' in flags:
-                if rng.random() < st.session_state.mc_ss_haircut_prob:
-                    sc['ss_haircut'] = st.session_state.mc_ss_haircut_size
-            return sc
+            return build_stress_scenario(rng, usd, flags=set(flags), years=im_years)
 
         def im_run(flags, n, seed=2024):
             eq = np.random.default_rng(seed); fac = np.random.default_rng(seed + 7777)
@@ -3302,22 +3549,8 @@ elif selection == "12. Monte Carlo Simulation":
                 sc['returns'] = {im_years[i]: (float(usd[i]), float(eur[i])) for i in range(im_n)}
                 sc['bond'] = {im_years[i]: float(bond[i]) for i in range(im_n)}
                 db, dd, _, _, _ = run_core_simulation(scenario=sc)
-                tot = db.loc['Total Portfolio Balance']
-                horizon = sc.get('death_year', 2089); depl = tot[tot <= 0]
-                nd = (len(depl) == 0) or (depl.index.min() > horizon)
-                if 'inflation' in sc:
-                    dm = {}; cpi = 1.0
-                    for y in im_years:
-                        if y > 2026: cpi *= (1+sc['inflation'][y])
-                        dm[y] = cpi
-                else:
-                    dm = {y:(1+im_inf)**(y-2026) for y in im_years}
-                life = dd.loc["Actual Lifestyle Spend"]; gift = dd.loc["Actual Generational Drip"]
-                stgt = sum(im_tmap[y] for y in im_ret_years) or 1.0
-                ar = sum(life.get(y,0)/dm[y] for y in im_ret_years)
-                full = (ar/stgt) >= 0.95
-                gtot = sum(gift.get(y,0)/dm[y] for y in im_ret_years)
-                if nd and full and gtot >= im_gift_goal: ok += 1
+                if score_path_joint(db, dd, sc, im_ret_years, im_tmap, im_gift_goal)['joint']:
+                    ok += 1
             return 100.0 * ok / n
 
         # Only include factors the user has enabled (longevity excluded by design).
@@ -3452,51 +3685,28 @@ elif selection == "13. Roth Conversion Ladder Optimizer":
             return st.session_state.spend_golden if a < 70 else (st.session_state.spend_middle if a < 85 else st.session_state.spend_wind)
         o_tmap = {y: o_tgt(o_start + (y - 2026)) for y in o_ret_years}
 
-        # Paired bootstrap returns + correlated EUR bond draws (same engine as the MC).
-        o_common = sorted(set(SP500_BY_YEAR) & set(MSCI_EUR_TOTAL_RETURNS))
-        o_uh = np.array([SP500_BY_YEAR[y] for y in o_common]) / 100.0
-        o_eh = np.array([MSCI_EUR_TOTAL_RETURNS[y] for y in o_common]) / 100.0
-        o_block = int(st.session_state.mc_block_len); o_nb = len(o_common) - o_block + 1
-        o_um = st.session_state.usd_market_return/100.0 + np.var(o_uh)/2
-        o_em = st.session_state.eur_market_return/100.0 + np.var(o_eh)/2
-        ob_mean = st.session_state.bond_mean/100.0; ob_vol = st.session_state.bond_vol/100.0
-        ob_cn = st.session_state.bond_eq_corr; ob_cc = st.session_state.bond_eq_corr_crisis
-        o_vsu, o_vse = build_valuation_shift(o_n, st.session_state.usd_market_return/100.0, st.session_state.eur_market_return/100.0)
-
+        # Shared machinery: same conditioned bootstrap world and survivor-aware
+        # joint scoring as the main MC. Stochastic LONGEVITY (with the survivor
+        # scenario) and the SS-haircut lottery are now part of the optimizer's
+        # objective -- conversions trade off against RMD-era exposure, and death
+        # timing is exactly what determines how long that era lasts. Common
+        # random numbers (fixed seeds) keep conversion levels comparable.
         def o_make(rng):
-            idx = []
-            while len(idx) < o_n:
-                s = rng.integers(0, o_nb); idx.extend(range(s, s + o_block))
-            idx = np.array(idx[:o_n])
-            u = o_uh[idx]-o_uh[idx].mean()+o_um+o_vsu; e = o_eh[idx]-o_eh[idx].mean()+o_em+o_vse
-            mu = u.mean(); sd = u.std() or 1e-9; zb = rng.standard_normal(o_n); b = np.empty(o_n)
-            for i, r in enumerate(u):
-                z = (r-mu)/sd; c = ob_cc if (z < -1.0 and r < 0) else ob_cn
-                b[i] = ob_mean + ob_vol*(c*z + np.sqrt(max(0.0,1-c**2))*zb[i])
-            u, e, b = apply_crisis_overlay(u, e, b, rng)
-            return u, e, b
+            return make_bootstrap_paths(rng, o_n)
 
         def o_score(conv_amt, n, seed=4242):
-            # Common random numbers: identical markets across every conversion level, so the
-            # only difference is the conversion strategy. This is what lets us compare levels.
-            eq = np.random.default_rng(seed); ok = 0
+            eq = np.random.default_rng(seed)
+            fac = np.random.default_rng(seed + 7777)
+            ok = 0
             for _ in range(n):
                 usd, eur, bond = o_make(eq)
-                sc = {
-                    'returns': {o_years[i]: (float(usd[i]), float(eur[i])) for i in range(o_n)},
-                    'bond': {o_years[i]: float(bond[i]) for i in range(o_n)},
-                    'roth_conv': (conv_amt, int(opt_start_age), int(opt_end_age)),
-                }
+                sc = build_stress_scenario(fac, usd, flags={'longevity', 'ss'}, years=o_years)
+                sc['returns'] = {o_years[i]: (float(usd[i]), float(eur[i])) for i in range(o_n)}
+                sc['bond'] = {o_years[i]: float(bond[i]) for i in range(o_n)}
+                sc['roth_conv'] = (conv_amt, int(opt_start_age), int(opt_end_age))
                 db, dd, _, _, _ = run_core_simulation(scenario=sc)
-                tot = db.loc['Total Portfolio Balance']
-                depl = tot[tot <= 0]; nd = (len(depl) == 0) or (depl.index.min() > 2089)
-                dm = {y:(1+o_inf)**(y-2026) for y in o_years}
-                life = dd.loc["Actual Lifestyle Spend"]; gift = dd.loc["Actual Generational Drip"]
-                stg = sum(o_tmap[y] for y in o_ret_years) or 1.0
-                ar = sum(life.get(y,0)/dm[y] for y in o_ret_years)
-                full = (ar/stg) >= 0.95
-                gt = sum(gift.get(y,0)/dm[y] for y in o_ret_years)
-                if nd and full and gt >= o_gift_goal: ok += 1
+                if score_path_joint(db, dd, sc, o_ret_years, o_tmap, o_gift_goal)['joint']:
+                    ok += 1
             return 100.0 * ok / n
 
         levels = np.linspace(0, int(opt_max_conv), int(opt_grid))
