@@ -45,7 +45,7 @@ if 'execute_great_reset' not in st.session_state: st.session_state.execute_great
 if 'enable_smoothing' not in st.session_state: st.session_state.enable_smoothing = True
 if 'target_early_draw' not in st.session_state: st.session_state.target_early_draw = 210000
 if 'gift_start_age' not in st.session_state: st.session_state.gift_start_age = 58
-if 'gift_end_age' not in st.session_state: st.session_state.gift_end_age = 78
+if 'gift_end_age' not in st.session_state: st.session_state.gift_end_age = 75
 # Master on/off for the dynamic generational gifting drip. When False, the model does NOT
 # gift surplus away (it lets the portfolio accumulate), regardless of the age window.
 if 'gifting_enable' not in st.session_state: st.session_state.gifting_enable = True
@@ -123,7 +123,7 @@ if 'floor_wind' not in st.session_state: st.session_state.floor_wind = 72000
 if 'slash_trigger' not in st.session_state: st.session_state.slash_trigger = 5.25
 if 'recovery_trigger' not in st.session_state: st.session_state.recovery_trigger = 4.25
 if 'raise_pct' not in st.session_state: st.session_state.raise_pct = 33.0
-if 'dynamic_gift_pct' not in st.session_state: st.session_state.dynamic_gift_pct = 50.0
+if 'dynamic_gift_pct' not in st.session_state: st.session_state.dynamic_gift_pct = 33.0
 
 # Institutional Stress Test Macros
 if 'sorr_enable' not in st.session_state: st.session_state.sorr_enable = False
