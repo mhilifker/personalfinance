@@ -144,6 +144,17 @@ if 'roth_first' not in st.session_state: st.session_state.roth_first = True
 if 'ibkr_lot_aging' not in st.session_state: st.session_state.ibkr_lot_aging = True
 if 'model_div_tax' not in st.session_state: st.session_state.model_div_tax = True
 if 'div_yield' not in st.session_state: st.session_state.div_yield = 1.7
+# --- Plan B (EU move 2027) machinery ---
+# Drag on the EUR equity sleeve from the PFIC/PRIIPs squeeze on a US citizen investing in
+# the EU (blocked from US ETFs by PRIIPs, punished on UCITS by PFIC rules). Plan B default 0.4.
+if 'eur_return_drag' not in st.session_state: st.session_state.eur_return_drag = 0.0
+# Slovenian state (ZPIZ) pension: accrues over contribution years between the move and
+# retirement. Basis defaults to ~the average Slovenian NET wage (CPI-indexed); statutory
+# accrual ~26.5% at 15 years + ~1.36%/yr beyond. Survivor keeps the larger benefit.
+if 'si_pension_enable' not in st.session_state: st.session_state.si_pension_enable = False
+if 'si_pension_basis_eur' not in st.session_state: st.session_state.si_pension_basis_eur = 19000
+if 'si_pension_claim_age' not in st.session_state: st.session_state.si_pension_claim_age = 65
+if 'si_pension_tax_pct' not in st.session_state: st.session_state.si_pension_tax_pct = 10.0
 if 'great_reset_mode' not in st.session_state: st.session_state.great_reset_mode = "Sweep at retirement (earnings taxed + 10% penalty if under 59½)"
 
 # Monte Carlo parameters
@@ -171,7 +182,8 @@ if 'mc_fx_vol' not in st.session_state: st.session_state.mc_fx_vol = 9.0
 # each year, matching the empirical long-horizon mean reversion of real exchange rates.
 if 'mc_fx_reversion' not in st.session_state: st.session_state.mc_fx_reversion = 0.15
 if 'mc_stoch_longevity' not in st.session_state: st.session_state.mc_stoch_longevity = True
-if 'mc_wife_age_offset' not in st.session_state: st.session_state.mc_wife_age_offset = 2
+# Mike and Stephanie are the SAME age (corrected from the earlier 2-year offset).
+if 'mc_wife_age_offset' not in st.session_state: st.session_state.mc_wife_age_offset = 0
 if 'mc_ltc_enable' not in st.session_state: st.session_state.mc_ltc_enable = True
 if 'mc_ltc_prob' not in st.session_state: st.session_state.mc_ltc_prob = 0.20
 if 'mc_ltc_cost' not in st.session_state: st.session_state.mc_ltc_cost = 75000
@@ -910,7 +922,12 @@ def get_ss_timelines(override_m_age=None, override_s_age=None, inflation_path=No
     s_claim = override_s_age if override_s_age is not None else st.session_state.steph_ss_age
     cola_path = build_cola_path(inflation_path)
     ret_cal_yr = 2026 + (st.session_state.ret_age - st.session_state.current_age)
-    working_years = max(0, ret_cal_yr - 2026)  # both spouses work until the household retires
+    move_cal_yr = 2026 + (st.session_state.move_age - st.session_state.current_age)
+    # US covered earnings stop at the EARLIER of retirement or the move abroad. In Plan A
+    # (move after retirement) this is unchanged; in Plan B (move 2027, retire later) only
+    # 2026 is credited -- Slovenian work accrues the ZPIZ pension instead (totalization
+    # protects vesting, not benefit size).
+    working_years = max(0, min(ret_cal_yr, move_cal_yr) - 2026)
     mike_age = st.session_state.current_age
     steph_age = st.session_state.current_age - st.session_state.get('mc_wife_age_offset', 2)
     mike_ss = calculate_person_benefit(st.session_state.mike_history, mike_age, working_years,
@@ -1040,6 +1057,9 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
             usd_yr_return, eur_yr_return = sc_returns[yr][0], sc_returns[yr][1]
         if sc_inflation is not None and yr in sc_inflation:
             i_rate = sc_inflation[yr]
+        # PFIC/PRIIPs vehicle drag on the EUR equity sleeve (Plan B: a US citizen investing
+        # from the EU faces costlier vehicles; applies to deterministic AND stochastic paths).
+        eur_yr_return -= st.session_state.get('eur_return_drag', 0.0) / 100.0
         # EUR/USD spot for the year (USD per EUR). Defined in BOTH phases: it prices any
         # conversion event pre-move and all cross-currency funding post-move.
         fx_spot = sc_fx[yr] if (sc_fx is not None and yr in sc_fx) else fx_base
@@ -1258,6 +1278,28 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         irs_shadow_tax_usd = us_ss_tax_usd + sl_ss_tax_usd
         net_ss_usd = gross_ss_usd - irs_shadow_tax_usd
 
+        # --- Slovenian state (ZPIZ) pension (Plan B) ---
+        # EUR-denominated income: funds euro spending 1:1 (no FX crossing). Accrual uses
+        # the statutory schedule (~26.5% of the basis at 15 contribution years + ~1.36%/yr
+        # beyond) over the years worked in Slovenia (move -> retirement); basis is CPI-
+        # indexed (wage growth = inflation per the Plan B assumption). The flat net-tax
+        # input approximates the SI pension credit + the residual US layer (a foreign
+        # pension is US-taxable, but at this size it sits mostly under the deduction).
+        # Survivor keeps the LARGER single benefit, mirroring the SS treatment.
+        si_pension_net_sc = 0.0
+        if st.session_state.get('si_pension_enable', False) and is_slovenia:
+            _yrs_c = max(0, st.session_state.ret_age - st.session_state.move_age)
+            if _yrs_c >= 15:
+                _acc = min(1.0, (26.5 + 1.36 * (_yrs_c - 15)) / 100.0)
+                _p_each = st.session_state.si_pension_basis_eur * _acc * cpi_index
+                _claim = st.session_state.si_pension_claim_age
+                _s_age = age - st.session_state.mc_wife_age_offset
+                _pm = _p_each if age >= _claim else 0.0
+                _ps = _p_each if _s_age >= _claim else 0.0
+                _gross_p = max(_pm, _ps) if in_survivor_phase else (_pm + _ps)
+                si_pension_net_sc = _gross_p * (1 - st.session_state.si_pension_tax_pct / 100.0)
+        si_pension_usd_equiv = si_pension_net_sc * sc_to_usd
+
         # ---------------------------------------------------------------------
         # ORDINARY-INCOME TAX MACHINERY for the year (Tier-1 fix #3).
         # Progressive mode (default): every dollar of ordinary income (pre-tax
@@ -1332,7 +1374,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         if st.session_state.gifting_enable and st.session_state.gift_start_age <= age <= st.session_state.gift_end_age:
             plan_return = st.session_state.usd_market_return / 100.0
             n_total = 100 - age
-            approx_annual_draw = max(0, target_cost_usd_equiv - net_ss_usd)
+            approx_annual_draw = max(0, target_cost_usd_equiv - net_ss_usd - si_pension_usd_equiv)
 
             if plan_return == i_rate:
                 fv_draws = approx_annual_draw * n_total * (1 + plan_return) ** (n_total - 1)
@@ -1356,7 +1398,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         # USD-equivalent COST of the euro basket).
         current_wr = 0.0
         if current_portfolio > 0:
-            eval_lifestyle_draw = max(0, (target_cost_usd_equiv * spend_level) - net_ss_usd)
+            eval_lifestyle_draw = max(0, (target_cost_usd_equiv * spend_level) - net_ss_usd - si_pension_usd_equiv)
             current_wr = eval_lifestyle_draw / current_portfolio
 
             if st.session_state.guardrails_enable:
@@ -1394,7 +1436,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
 
         # Capture actual WR for tracking (USD-equivalent cost of the actual basket)
         actual_cost_usd_equiv = actual_lifestyle_usd * col_ratio * sc_to_usd
-        final_eval_draw = max(0, actual_cost_usd_equiv - net_ss_usd)
+        final_eval_draw = max(0, actual_cost_usd_equiv - net_ss_usd - si_pension_usd_equiv)
         final_wr = final_eval_draw / current_portfolio if current_portfolio > 0 else 0.0
         wr_matrix[yr] = final_wr
 
@@ -1411,7 +1453,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         lifestyle_sc = actual_lifestyle_usd * col_ratio
         gift_sc = actual_gift_usd * usd_to_sc
         ss_sc = net_ss_usd * usd_to_sc
-        remaining_need_sc = max(0, (lifestyle_sc + gift_sc) - ss_sc)
+        remaining_need_sc = max(0, (lifestyle_sc + gift_sc) - ss_sc - si_pension_net_sc)
 
         # ---------------------------------------------------------------------
         # ONE-TIME EVENT TAXES, funded through the waterfall.
@@ -1624,6 +1666,7 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
         d_col = draws_usd.copy()
         d_col["Michael's SS"] = ss_m
         d_col["Stephanie's SS"] = ss_s
+        d_col["Slovenian Pension (Net)"] = si_pension_net_sc * sc_to_usd
         d_col["-------------------"] = 0
         d_col["Actual Lifestyle Spend"] = actual_lifestyle_usd
         d_col["Actual Generational Drip"] = actual_gift_usd
@@ -1665,6 +1708,62 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
 # -----------------------------------------------------------------------------
 # PAGE ROUTING
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# SCENARIO SELECTOR (Plan A vs Plan B)
+# A defaults PROFILE, applied only when the selector CHANGES (apply-on-change),
+# so user edits are never clobbered on Streamlit's reruns. Plan B repurposes the
+# policy table's "Northbrook Grind" column as POST-MOVE savings (the switch year
+# nb_start_yr doubles as the move year, 2027).
+# -----------------------------------------------------------------------------
+PLAN_A = "Plan A \u2014 save in US, retire 2044 at 55, move 2045"
+PLAN_B = "Plan B \u2014 move to EU in 2027, retire at 62"
+
+def _apply_scenario_profile(name):
+    S = st.session_state
+    pdf = S.policy_df.copy()
+    if name == PLAN_B:
+        S.move_age = 38; S.ret_age = 62
+        S.nb_start_yr = 2027                  # = the move year: US contributions stop here
+        S.execute_great_reset = False         # 401(k)s untouchable at 38; sweep strategy dies
+        S.roth_conv_annual = 0                # conversions double-taxed from 2027
+        S.spend_golden, S.spend_middle, S.spend_wind = 90000, 85000, 85000
+        S.home_price = 0; S.down_payment = 0  # renting in Slovenia; no Northbrook sale
+        S.eur_return_drag = 0.4               # PFIC/PRIIPs vehicle squeeze
+        S.si_pension_enable = True            # ZPIZ accrues 38 -> 62 (24 years)
+        # Post-move savings: $5,000/yr HOUSEHOLD TOTAL into IBKR, flat nominal. Everything
+        # else freezes (US accounts keep compounding but receive nothing).
+        pdf["Northbrook Grind"] = [5000.0 if a == "IBKR (Active)" else 0.0
+                                   for a in pdf["Asset Category"]]
+    else:
+        S.move_age = 56; S.ret_age = 55
+        S.nb_start_yr = 2027
+        S.execute_great_reset = True
+        S.spend_golden, S.spend_middle, S.spend_wind = 127000, 98000, 85000
+        S.home_price = 1050000; S.down_payment = 150000
+        S.eur_return_drag = 0.0
+        S.si_pension_enable = False
+        pdf["Northbrook Grind"] = [0.0, 20000.0, 30000.0, 0.0, 15000.0,
+                                   30000.0, 0.0, 0.0, 0.0, 0.0]
+    S.policy_df = pdf
+    # Engine semantics changed: invalidate cached MC results so stale numbers never display.
+    for k in ("dash_success_v3", "p7_bands_v2", "p8_bands_v2"):
+        S.pop(k, None)
+
+st.sidebar.title("Scenario")
+_scen = st.sidebar.selectbox("Life plan", [PLAN_A, PLAN_B],
+                             index=1 if st.session_state.get("_last_scenario") == PLAN_B else 0,
+                             help="Switching applies that plan's default profile ONCE (timeline, "
+                                  "savings ledger, spending phases, housing, Great Reset, EUR "
+                                  "vehicle drag, Slovenian pension). Your subsequent edits on any "
+                                  "page are preserved until you switch again.")
+if st.session_state.get("_last_scenario") != _scen:
+    _apply_scenario_profile(_scen)
+    st.session_state._last_scenario = _scen
+if _scen == PLAN_B:
+    st.sidebar.caption("Plan B: \"Northbrook Grind\" column = post-move savings ($5k/yr "
+                       "household into IBKR). US SS credits stop after 2026; the ZPIZ pension "
+                       "accrues over the 24 Slovenian working years and claims at 65.")
+
 st.sidebar.title("Navigation")
 selection = st.sidebar.radio("Navigate", ["1. Executive Dashboard", "2. Pre-Set Asset Ledger & Tax Lots", "3. Investment Policy Editor", "4. Real Estate & Relocation", "5. The Great Reset Simulator", "6. Social Security & Pensions", "7. Cash Flow & Slovenian Drip", "8. Yearly Balances (2026-2089)", "9. Tax Torpedo Optimizer", "10. Institutional Stress Testing", "11. Longevity Optimizer (Guardrails)", "12. Monte Carlo Simulation", "13. Roth Conversion Ladder Optimizer", "14. Variance Decomposition (Sobol)", "15. Historical Cohort Backtest"])
 
@@ -2134,6 +2233,11 @@ elif selection == "3. Investment Policy Editor":
     st.session_state.div_yield = te5.number_input(
         "Dividend Yield (%)", value=st.session_state.div_yield, step=0.1,
         help="Cash yield on the taxable equity sleeves used for the annual dividend tax drag.")
+    st.session_state.eur_return_drag = st.number_input(
+        "EUR Sleeve Vehicle Drag (%/yr)", value=st.session_state.eur_return_drag, step=0.1,
+        help="Return penalty on the EUR equity sleeve from the PFIC/PRIIPs squeeze on a US "
+             "citizen investing from the EU (blocked from US ETFs by PRIIPs; punished on UCITS "
+             "by PFIC rules; workarounds cost basis points). Plan B defaults to 0.4; Plan A 0.")
     
     st.markdown("---")
     st.subheader("Phase Contribution Policies")
@@ -2370,6 +2474,29 @@ elif selection == "6. Social Security & Pensions":
             f"over 30 years and compounds with the {st.session_state.trust_fund_haircut}% trust-fund "
             f"haircut \u2014 a deliberately pessimistic SS scenario, most punishing for the survivor."
         )
+
+    st.markdown("---")
+    st.subheader("Slovenian State Pension (ZPIZ) \u2014 Plan B")
+    zp0, zp1, zp2, zp3 = st.columns(4)
+    st.session_state.si_pension_enable = zp0.toggle(
+        "Enable ZPIZ pension", value=st.session_state.si_pension_enable,
+        help="Accrues over the Slovenian working years (move age to retirement age) at the "
+             "statutory schedule: ~26.5% of the basis at 15 contribution years + ~1.36%/yr "
+             "beyond (Plan B's 24 years \u2248 39% each). Below 15 years, no pension. Survivor "
+             "keeps the larger single benefit. EUR income \u2014 a natural hedge, no FX crossing.")
+    st.session_state.si_pension_basis_eur = zp1.number_input(
+        "Pension basis (\u20ac/yr, net)", value=st.session_state.si_pension_basis_eur, step=1000,
+        help="Proxy for the ZPIZ pension rating base in today's euros, CPI-indexed (wage growth "
+             "= inflation per Plan B). Default \u2248 average Slovenian net wage. Replace with a "
+             "real ZPIZ projection when you have one \u2014 this is the module's softest number.")
+    st.session_state.si_pension_claim_age = zp2.number_input(
+        "Claim age", value=st.session_state.si_pension_claim_age, step=1,
+        help="Statutory old-age pension age (65 with 15+ contribution years).")
+    st.session_state.si_pension_tax_pct = zp3.number_input(
+        "Net tax on pension (%)", value=st.session_state.si_pension_tax_pct, step=1.0,
+        help="Flat haircut approximating the Slovenian pension tax credit plus the residual US "
+             "layer (a foreign pension is US-taxable income, though at this size it sits mostly "
+             "under the standard deduction).")
 
     # Quantify the stacked pessimism so the assumption pile is a CHOICE, not an accident.
     _hc = st.session_state.trust_fund_haircut / 100.0
