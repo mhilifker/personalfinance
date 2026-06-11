@@ -1726,20 +1726,20 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
 # nb_start_yr doubles as the move year, 2027).
 # -----------------------------------------------------------------------------
 PLAN_A = "Plan A \u2014 save in US, retire 2044 at 55, move 2045"
-PLAN_B = "Plan B \u2014 move to EU in 2027, retire at 62"
+PLAN_B = "Plan B \u2014 move to EU in 2027, retire at 63"
 
 def _apply_scenario_profile(name):
     S = st.session_state
     pdf = S.policy_df.copy()
     if name == PLAN_B:
-        S.move_age = 38; S.ret_age = 62
+        S.move_age = 38; S.ret_age = 63
         S.nb_start_yr = 2027                  # = the move year: US contributions stop here
         S.execute_great_reset = False         # 401(k)s untouchable at 38; sweep strategy dies
         S.roth_conv_annual = 0                # conversions double-taxed from 2027
         S.spend_golden, S.spend_middle, S.spend_wind = 90000, 85000, 85000
         S.home_price = 0; S.down_payment = 0  # renting in Slovenia; no Northbrook sale
         S.eur_return_drag = 0.4               # PFIC/PRIIPs vehicle squeeze
-        S.si_pension_enable = True            # ZPIZ accrues 38 -> 62 (24 years)
+        S.si_pension_enable = True            # ZPIZ accrues 38 -> 63 (24 years)
         S.move_lump_ibkr_usd = 100000         # one-time relocation capital into IBKR (2027)
         S.enable_smoothing = False            # no strategic pre-tax depletion (ages 60-74)
         # Post-move savings: $5,000/yr HOUSEHOLD TOTAL into IBKR, flat nominal. Everything
