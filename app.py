@@ -45,7 +45,7 @@ if 'execute_great_reset' not in st.session_state: st.session_state.execute_great
 if 'enable_smoothing' not in st.session_state: st.session_state.enable_smoothing = True
 if 'target_early_draw' not in st.session_state: st.session_state.target_early_draw = 210000
 if 'gift_start_age' not in st.session_state: st.session_state.gift_start_age = 58
-if 'gift_end_age' not in st.session_state: st.session_state.gift_end_age = 75
+if 'gift_end_age' not in st.session_state: st.session_state.gift_end_age = 78
 # Master on/off for the dynamic generational gifting drip. When False, the model does NOT
 # gift surplus away (it lets the portfolio accumulate), regardless of the age window.
 if 'gifting_enable' not in st.session_state: st.session_state.gifting_enable = True
@@ -151,6 +151,8 @@ if 'eur_return_drag' not in st.session_state: st.session_state.eur_return_drag =
 # Slovenian state (ZPIZ) pension: accrues over contribution years between the move and
 # retirement. Basis defaults to ~the average Slovenian NET wage (CPI-indexed); statutory
 # accrual ~26.5% at 15 years + ~1.36%/yr beyond. Survivor keeps the larger benefit.
+# One-time USD transfer into IBKR at the move year (buys euros at spot).
+if 'move_lump_ibkr_usd' not in st.session_state: st.session_state.move_lump_ibkr_usd = 0
 if 'si_pension_enable' not in st.session_state: st.session_state.si_pension_enable = False
 if 'si_pension_basis_eur' not in st.session_state: st.session_state.si_pension_basis_eur = 19000
 if 'si_pension_claim_age' not in st.session_state: st.session_state.si_pension_claim_age = 65
@@ -1141,6 +1143,14 @@ def run_core_simulation(override_m_age=None, override_s_age=None, override_early
             # instead of summing euros and dollars 1:1.
             return sum(b * (fx_spot if a in EUR_ASSETS else 1.0) for a, b in current_balances.items())
 
+        # One-time transfer into IBKR at the move year (e.g. Plan B's $100k relocation
+        # capital): USD buys euros at the year's spot rate, starts the SI holding clock.
+        if yr == move_yr and st.session_state.get('move_lump_ibkr_usd', 0) > 0:
+            _lump_eur = st.session_state.move_lump_ibkr_usd / fx_spot
+            current_balances["IBKR (Active)"] += _lump_eur
+            current_basis["IBKR (Active)"] += _lump_eur
+            _ibkr_add(_lump_eur)
+
         # ---------------------------------------------------------------------
         # ACCUMULATION PHASE
         # ---------------------------------------------------------------------
@@ -1730,6 +1740,8 @@ def _apply_scenario_profile(name):
         S.home_price = 0; S.down_payment = 0  # renting in Slovenia; no Northbrook sale
         S.eur_return_drag = 0.4               # PFIC/PRIIPs vehicle squeeze
         S.si_pension_enable = True            # ZPIZ accrues 38 -> 62 (24 years)
+        S.move_lump_ibkr_usd = 100000         # one-time relocation capital into IBKR (2027)
+        S.enable_smoothing = False            # no strategic pre-tax depletion (ages 60-74)
         # Post-move savings: $5,000/yr HOUSEHOLD TOTAL into IBKR, flat nominal. Everything
         # else freezes (US accounts keep compounding but receive nothing).
         pdf["Northbrook Grind"] = [5000.0 if a == "IBKR (Active)" else 0.0
@@ -1742,6 +1754,8 @@ def _apply_scenario_profile(name):
         S.home_price = 1050000; S.down_payment = 150000
         S.eur_return_drag = 0.0
         S.si_pension_enable = False
+        S.move_lump_ibkr_usd = 0
+        S.enable_smoothing = True
         pdf["Northbrook Grind"] = [0.0, 20000.0, 30000.0, 0.0, 15000.0,
                                    30000.0, 0.0, 0.0, 0.0, 0.0]
     S.policy_df = pdf
@@ -2271,6 +2285,11 @@ elif selection == "3. Investment Policy Editor":
 # -----------------------------------------------------------------------------
 elif selection == "4. Real Estate & Relocation":
     st.header("4. Real Estate & Relocation")
+    st.session_state.move_lump_ibkr_usd = st.number_input(
+        "One-Time Transfer into IBKR at the Move ($)", value=st.session_state.move_lump_ibkr_usd, step=10000,
+        help="Relocation capital moved into the EUR-denominated IBKR sleeve in the move year, "
+             "converted at the spot rate (starts the Slovenian holding-period clock). "
+             "Plan B defaults to $100k; Plan A to $0.")
     c1, c2 = st.columns(2)
     st.session_state.home_price = c1.number_input("Home Purchase Price ($)", value=st.session_state.home_price, step=25000)
     st.session_state.down_payment = c2.number_input("Down Payment ($)", value=st.session_state.down_payment, step=10000)
