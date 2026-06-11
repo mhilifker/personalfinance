@@ -2053,12 +2053,21 @@ if selection == "1. Executive Dashboard":
         chart_draws['Brokerage & Cash Draw'] = chart_draws['E*TRADE (Legacy)'] + chart_draws['IBKR (Active)'] + chart_draws['Crypto (Coinbase)'] + chart_draws['Cash (Slush Fund)'] + chart_draws['HSA Pool']
         chart_draws['Pre-Tax Draw'] = chart_draws['Cornerstone: Trad 401(k)'] + chart_draws['Cornerstone: Profit Sharing'] + chart_draws['OCC: Trad 401(k)']
         chart_draws['Social Security'] = chart_draws["Michael's SS"] + chart_draws["Stephanie's SS"]
-        
+        chart_draws['Roth Draw'] = chart_draws['Cornerstone: Roth 401(k)'] + chart_draws['OCC: Roth 401(k)']
+        # ZPIZ pension is its OWN series, not lumped into Social Security: different payer,
+        # different currency (EUR -- no FX risk against the euro liability), different
+        # political risk. Shown in USD-equivalents at spot like everything else.
+        chart_draws['Slovenian Pension'] = chart_draws['Slovenian Pension (Net)']
+
         fig2 = make_subplots(specs=[[{"secondary_y": True}]])
         
         fig2.add_trace(go.Bar(x=chart_draws.index, y=chart_draws['Brokerage & Cash Draw'], name='Brokerage & Cash Draw'), secondary_y=False)
         fig2.add_trace(go.Bar(x=chart_draws.index, y=chart_draws['Pre-Tax Draw'], name='Pre-Tax Draw'), secondary_y=False)
+        if chart_draws['Roth Draw'].sum() > 0:
+            fig2.add_trace(go.Bar(x=chart_draws.index, y=chart_draws['Roth Draw'], name='Roth Draw'), secondary_y=False)
         fig2.add_trace(go.Bar(x=chart_draws.index, y=chart_draws['Social Security'], name='Social Security'), secondary_y=False)
+        if chart_draws['Slovenian Pension'].sum() > 0:
+            fig2.add_trace(go.Bar(x=chart_draws.index, y=chart_draws['Slovenian Pension'], name='Slovenian Pension (ZPIZ)'), secondary_y=False)
         
         fig2.add_trace(go.Scatter(
             x=chart_draws.index, 
